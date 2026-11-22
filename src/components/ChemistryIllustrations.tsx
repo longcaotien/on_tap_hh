@@ -16,7 +16,7 @@ export function ChemistryIllustration({ id, caption }: Props) {
   return (
     <div className="my-4 rounded-2xl border border-slate-200/90 bg-gradient-to-b from-white to-slate-50/90 shadow-sm overflow-hidden transition-all">
       {/* Top Lab Diagram Toolbar */}
-      <div className="flex items-center justify-between px-4 py-2 bg-slate-100/80 border-b border-slate-200/70 text-xs text-slate-600">
+      <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 bg-slate-100/80 border-b border-slate-200/70 text-xs text-slate-600">
         <div className="flex items-center gap-2 font-medium text-slate-700">
           <span className="inline-flex h-2 w-2 rounded-full bg-teal-600"></span>
           <span>Hình vẽ mô phỏng chuẩn hóa học (Vector CAD)</span>

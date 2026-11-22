@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useRef } from "react";
 import { CHEMISTRY_QUESTIONS, TopicId } from "@/data/chemistryQuestions";
 import {
   Atom,
@@ -30,7 +30,14 @@ export function ChemistryTheoryHub({ onStartTopicQuiz }: Props) {
     topicFilter === "all" ? true : q.topic === topicFilter
   );
 
-  const currentQ = filteredQuestions[cardIndex] || filteredQuestions[0];
+  // Derive a safe index so the card never goes out of bounds when filtering
+  const safeCardIndex = filteredQuestions.length
+    ? Math.min(cardIndex, filteredQuestions.length - 1)
+    : 0;
+  const currentQ = filteredQuestions[safeCardIndex] || filteredQuestions[0];
+
+  const touchStartRef = useRef<{ x: number; y: number } | null>(null);
+  const suppressClickRef = useRef(false);
 
   const handleNextCard = () => {
     setIsFlipped(false);
@@ -339,7 +346,32 @@ export function ChemistryTheoryHub({ onStartTopicQuiz }: Props) {
         </div>
       ) : (
         /* ==================== FLASHCARD MODE ==================== */
-        <div className="max-w-3xl mx-auto space-y-6">
+        <div
+          className="max-w-3xl mx-auto space-y-6"
+          style={{ touchAction: "pan-y" }}
+          onTouchStart={(e) => {
+            const target = e.target as HTMLElement;
+            if (target.closest("button, textarea, input, a")) {
+              touchStartRef.current = null;
+              return;
+            }
+            const t = e.touches[0];
+            touchStartRef.current = { x: t.clientX, y: t.clientY };
+          }}
+          onTouchEnd={(e) => {
+            const start = touchStartRef.current;
+            touchStartRef.current = null;
+            if (!start) return;
+            const t = e.changedTouches[0];
+            const dx = t.clientX - start.x;
+            const dy = t.clientY - start.y;
+            if (Math.abs(dx) > 70 && Math.abs(dx) > Math.abs(dy) * 1.6) {
+              suppressClickRef.current = true;
+              if (dx < 0) handleNextCard();
+              else handlePrevCard();
+            }
+          }}
+        >
           {/* Topic Filter Pills */}
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex flex-wrap gap-2">
@@ -370,13 +402,19 @@ export function ChemistryTheoryHub({ onStartTopicQuiz }: Props) {
             </div>
 
             <span className="text-xs font-mono font-semibold text-slate-500">
-              Thẻ {cardIndex + 1} / {filteredQuestions.length}
+              Thẻ {safeCardIndex + 1} / {filteredQuestions.length}
             </span>
           </div>
 
           {/* Interactive 3D-feel Flashcard */}
           <div
-            onClick={() => setIsFlipped((v) => !v)}
+            onClick={() => {
+              if (suppressClickRef.current) {
+                suppressClickRef.current = false;
+                return;
+              }
+              setIsFlipped((v) => !v);
+            }}
             className="cursor-pointer select-none rounded-3xl border-2 border-slate-200 bg-white p-6 sm:p-10 shadow-md hover:shadow-lg transition-all min-h-[320px] flex flex-col justify-between relative overflow-hidden"
           >
             <div className="flex items-center justify-between border-b border-slate-100 pb-4">
@@ -475,19 +513,19 @@ export function ChemistryTheoryHub({ onStartTopicQuiz }: Props) {
           </div>
 
           {/* Flashcard Controls */}
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between gap-2">
             <button
               type="button"
               onClick={handlePrevCard}
-              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-white border border-slate-200 text-slate-700 font-semibold text-sm hover:bg-slate-50 shadow-sm"
+              className="inline-flex items-center gap-1.5 px-3 sm:px-5 py-2.5 min-h-[48px] rounded-xl bg-white border border-slate-200 text-slate-700 font-semibold text-xs sm:text-sm hover:bg-slate-50 active:scale-95 transition-all shadow-sm"
             >
               <ChevronLeft className="w-4 h-4" />
-              Câu trước
+              <span className="hidden min-[420px]:inline">Câu trước</span>
             </button>
             <button
               type="button"
               onClick={() => setIsFlipped((v) => !v)}
-              className="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl bg-teal-700 text-white font-semibold text-sm hover:bg-teal-800 shadow-sm"
+              className="inline-flex items-center justify-center gap-2 flex-1 sm:flex-none px-4 sm:px-6 py-2.5 min-h-[48px] rounded-xl bg-teal-700 text-white font-semibold text-xs sm:text-sm hover:bg-teal-800 active:scale-95 transition-all shadow-sm"
             >
               <RotateCcw className="w-4 h-4" />
               {isFlipped ? "Xem đề bài" : "Lật xem đáp án"}
@@ -495,9 +533,9 @@ export function ChemistryTheoryHub({ onStartTopicQuiz }: Props) {
             <button
               type="button"
               onClick={handleNextCard}
-              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-white border border-slate-200 text-slate-700 font-semibold text-sm hover:bg-slate-50 shadow-sm"
+              className="inline-flex items-center gap-1.5 px-3 sm:px-5 py-2.5 min-h-[48px] rounded-xl bg-white border border-slate-200 text-slate-700 font-semibold text-xs sm:text-sm hover:bg-slate-50 active:scale-95 transition-all shadow-sm"
             >
-              Câu tiếp theo
+              <span className="hidden min-[420px]:inline">Câu tiếp theo</span>
               <ChevronRight className="w-4 h-4" />
             </button>
           </div>
