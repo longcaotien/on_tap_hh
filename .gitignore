@@ -1,4 +1,8 @@
 node_modules
 .next
+out
 .env*
 *.log
+*.tsbuildinfo
+next-env.d.ts
+.static-build
