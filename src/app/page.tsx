@@ -987,6 +987,9 @@ export default function ChemistryStudyPlatform() {
             <ChemistryIllustration
               id={q.illustrationId}
               caption={q.illustrationCaption}
+              // Caption/notes stay locked until the question is graded so the
+              // figure never gives away part of the answer.
+              revealCaption={isChecked || isSubmitted}
             />
           )}
 
