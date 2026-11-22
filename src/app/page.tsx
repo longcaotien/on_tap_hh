@@ -12,6 +12,13 @@ import {
 import { ChemistryIllustration } from "@/components/ChemistryIllustrations";
 import { ChemistryTheoryHub } from "@/components/ChemistryTheoryHub";
 import {
+  loadProgressData,
+  sendProgressAction,
+  resetAllProgress,
+  type QuestionProgressItem,
+  type StudySessionRecord,
+} from "@/lib/progressStore";
+import {
   Atom,
   BookOpen,
   CheckCircle2,
@@ -51,28 +58,6 @@ import {
 type NavTab = "home" | "practice" | "wrong_vault" | "theory";
 type FeedbackMode = "instant" | "exam";
 type WorkspaceLayout = "single" | "sheet";
-
-interface QuestionProgressItem {
-  questionId: number;
-  status: "unseen" | "mastered" | "wrong";
-  wrongCount: number;
-  correctCount: number;
-  bookmarked: boolean;
-  personalNote: string;
-}
-
-interface StudySessionRecord {
-  id: number;
-  mode: string;
-  topicFilter: string;
-  totalQuestions: number;
-  correctCount: number;
-  score: number;
-  maxScore: number;
-  durationSeconds: number;
-  shuffled: boolean;
-  createdAt: string;
-}
 
 // Helper to shuffle an array deterministically or randomly
 function shuffleArray<T>(arr: T[]): T[] {
@@ -157,31 +142,18 @@ export default function ChemistryStudyPlatform() {
     (q: ChemistryQuestion, key: "A" | "B" | "C" | "D") => void
   >(() => {});
 
-  // Load initial progress and sessions from PostgreSQL API
+  // Load initial progress + sessions (server API, with a localStorage
+  // fallback when the app is deployed as a static site e.g. GitHub Pages)
   useEffect(() => {
     async function fetchInitialData() {
       try {
-        const res = await fetch("/api/progress");
-        if (res.ok) {
-          const data = await res.json();
-          const map: Record<number, QuestionProgressItem> = {};
-          if (Array.isArray(data.progress)) {
-            for (const item of data.progress) {
-              map[item.questionId] = {
-                questionId: item.questionId,
-                status: item.status || "unseen",
-                wrongCount: item.wrongCount || 0,
-                correctCount: item.correctCount || 0,
-                bookmarked: Boolean(item.bookmarked),
-                personalNote: item.personalNote || "",
-              };
-            }
-          }
-          setProgressMap(map);
-          if (Array.isArray(data.sessions)) {
-            setSessions(data.sessions);
-          }
+        const data = await loadProgressData();
+        const map: Record<number, QuestionProgressItem> = {};
+        for (const item of data.progress) {
+          map[item.questionId] = item;
         }
+        setProgressMap(map);
+        setSessions(data.sessions);
       } catch (err) {
         console.error("Error loading progress:", err);
       } finally {
@@ -269,14 +241,7 @@ export default function ChemistryStudyPlatform() {
       const updated = { ...existing, ...updates };
       setProgressMap((prev) => ({ ...prev, [questionId]: updated }));
       try {
-        await fetch("/api/progress", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            action: "update_question",
-            ...updated,
-          }),
-        });
+        await sendProgressAction({ action: "update_question", ...updated });
       } catch (e) {
         console.error("Sync question error:", e);
       }
@@ -696,28 +661,21 @@ export default function ChemistryStudyPlatform() {
       }
     }
 
-    // Save session to PostgreSQL
+    // Save session (PostgreSQL when available, localStorage on static hosting)
     try {
-      const res = await fetch("/api/progress", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "save_session",
-          mode: sessionModeTag,
-          topicFilter: selectedTopics.join(","),
-          totalQuestions: activeQueue.length,
-          correctCount: correctQCount,
-          score: normalizedScore,
-          maxScore: 10,
-          durationSeconds: elapsedSeconds,
-          shuffled: shuffleQuestions,
-        }),
+      const { session } = await sendProgressAction({
+        action: "save_session",
+        mode: sessionModeTag,
+        topicFilter: selectedTopics.join(","),
+        totalQuestions: activeQueue.length,
+        correctCount: correctQCount,
+        score: normalizedScore,
+        maxScore: 10,
+        durationSeconds: elapsedSeconds,
+        shuffled: shuffleQuestions,
       });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.session) {
-          setSessions((prev) => [data.session, ...prev.slice(0, 24)]);
-        }
+      if (session) {
+        setSessions((prev) => [session, ...prev.slice(0, 24)]);
       }
     } catch (e) {
       console.error("Failed to save session:", e);
@@ -2039,11 +1997,7 @@ export default function ChemistryStudyPlatform() {
                   <button
                     type="button"
                     onClick={async () => {
-                      await fetch("/api/progress", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ action: "reset_all" }),
-                      });
+                      await resetAllProgress();
                       setProgressMap({});
                       setSessions([]);
                     }}
@@ -2767,11 +2721,7 @@ export default function ChemistryStudyPlatform() {
                   <button
                     type="button"
                     onClick={async () => {
-                      await fetch("/api/progress", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ action: "clear_wrong" }),
-                      });
+                      await sendProgressAction({ action: "clear_wrong" });
                       setProgressMap((prev) => {
                         const next = { ...prev };
                         for (const k of Object.keys(next)) {
