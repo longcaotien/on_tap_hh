@@ -2,16 +2,28 @@
 
 import React, { useState } from "react";
 import { IllustrationId } from "@/data/chemistryQuestions";
-import { ZoomIn, ZoomOut, Sparkles } from "lucide-react";
+import { ZoomIn, ZoomOut, Sparkles, Eye } from "lucide-react";
 
 interface Props {
   id: IllustrationId;
   caption?: string;
+  /**
+   * Set to false while the question is still unanswered: the caption can hint
+   * at the answer, so it stays locked behind an explicit tap.
+   */
+  revealCaption?: boolean;
 }
 
-export function ChemistryIllustration({ id, caption }: Props) {
+export function ChemistryIllustration({
+  id,
+  caption,
+  revealCaption = true,
+}: Props) {
   const [zoomed, setZoomed] = useState(false);
-  const [showLabels, setShowLabels] = useState(true);
+  // Labels call out reagents/products, so they must never be enabled by default:
+  // the student turns them on deliberately when they need them.
+  const [showLabels, setShowLabels] = useState(false);
+  const [captionOpen, setCaptionOpen] = useState(false);
 
   return (
     <div className="my-4 rounded-2xl border border-slate-200/90 bg-gradient-to-b from-white to-slate-50/90 shadow-sm overflow-hidden transition-all">
@@ -72,9 +84,27 @@ export function ChemistryIllustration({ id, caption }: Props) {
         </div>
       </div>
 
-      {caption && (
+      {caption && revealCaption && (
         <div className="px-4 py-2.5 bg-slate-50 border-t border-slate-200/60 text-center text-xs sm:text-sm text-slate-600 italic">
           {caption}
+        </div>
+      )}
+
+      {caption && !revealCaption && (
+        <div className="px-4 py-2.5 bg-slate-50 border-t border-slate-200/60 text-center">
+          {captionOpen ? (
+            <p className="text-xs sm:text-sm text-slate-600 italic">{caption}</p>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setCaptionOpen(true)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 min-h-[36px] rounded-lg bg-white border border-slate-200 text-xs font-semibold text-slate-600 hover:bg-slate-100 active:scale-95 transition-all"
+              title="Chú thích hình có thể gợi ý đáp án"
+            >
+              <Eye className="w-3.5 h-3.5" />
+              Hiện chú thích hình
+            </button>
+          )}
         </div>
       )}
     </div>
