@@ -1,13 +1,31 @@
 @import "tailwindcss";
 
 @layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+    scroll-behavior: smooth;
+  }
   body {
     font-family: var(--font-sans), system-ui, -apple-system, sans-serif;
+    -webkit-tap-highlight-color: transparent;
+    overscroll-behavior-y: none;
   }
   code,
   pre,
   .font-mono {
     font-family: var(--font-mono), monospace;
+  }
+  button {
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+  }
+  button:focus-visible,
+  a:focus-visible,
+  input:focus-visible,
+  textarea:focus-visible {
+    outline: 2px solid #0d9488;
+    outline-offset: 2px;
   }
 }
 
@@ -17,6 +35,36 @@
   background-size: 24px 24px;
 }
 
+/* Safe-area helpers for notched phones (iPhone home indicator etc.) */
+.safe-bottom {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+.safe-top {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+
+/* Thin, unobtrusive scrollbars */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #cbd5e1 transparent;
+}
+*::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+*::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 999px;
+}
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* ---------- Animations (smooth & lightweight, GPU-friendly) ---------- */
 @keyframes fadeIn {
   from {
     opacity: 0;
@@ -28,6 +76,104 @@
   }
 }
 
+@keyframes slideInNext {
+  from {
+    opacity: 0;
+    transform: translateX(28px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes slideInPrev {
+  from {
+    opacity: 0;
+    transform: translateX(-28px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes popIn {
+  0% {
+    opacity: 0;
+    transform: scale(0.85);
+  }
+  60% {
+    transform: scale(1.06);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes toastIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes countdownBar {
+  from {
+    width: 100%;
+  }
+  to {
+    width: 0%;
+  }
+}
+
+@keyframes flamePop {
+  0% {
+    transform: scale(1);
+  }
+  40% {
+    transform: scale(1.25) rotate(-4deg);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
 .animate-fadeIn {
   animation: fadeIn 0.22s ease-out forwards;
+}
+.animate-slide-next {
+  animation: slideInNext 0.28s cubic-bezier(0.22, 0.9, 0.3, 1) forwards;
+}
+.animate-slide-prev {
+  animation: slideInPrev 0.28s cubic-bezier(0.22, 0.9, 0.3, 1) forwards;
+}
+.animate-pop {
+  animation: popIn 0.25s ease-out forwards;
+}
+.animate-toast-in {
+  animation: toastIn 0.22s ease-out forwards;
+}
+.animate-countdown-bar {
+  animation: countdownBar 1.8s linear forwards;
+}
+.animate-flame-pop {
+  animation: flamePop 0.4s ease-out;
+}
+
+/* Respect users who prefer reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

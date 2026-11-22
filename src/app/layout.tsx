@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import type { ReactNode } from "react";
 import { Be_Vietnam_Pro, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
@@ -19,6 +19,18 @@ export const metadata: Metadata = {
   title: "ChemLab 11 | Hệ Thống Ôn Luyện Lý Thuyết Hóa Học 11 – Sulfur & Hợp Chất",
   description:
     "Nền tảng ôn tập và luyện thi 47 câu hỏi Lý thuyết Hóa 11 (Sulfur, Sulfur dioxide, Sulfuric acid - Sulfate, Đúng/Sai thí nghiệm) với hình vẽ chuẩn phòng lab, ôn câu sai, ôn từng phần và xáo trộn thông minh.",
+  appleWebApp: {
+    capable: true,
+    title: "ChemLab 11",
+    statusBarStyle: "default",
+  },
+};
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
+  themeColor: "#0f766e",
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {
