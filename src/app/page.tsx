@@ -1,7 +1,15 @@
 "use client";
 
-import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
-import confetti from "canvas-confetti";
+import React, {
+  useState,
+  useEffect,
+  useMemo,
+  useCallback,
+  useRef,
+  useDeferredValue,
+  useSyncExternalStore,
+  type ComponentType,
+} from "react";
 import {
   CHEMISTRY_QUESTIONS,
   TOPICS_META,
@@ -9,8 +17,16 @@ import {
   TopicId,
   McqOption,
 } from "@/data/chemistryQuestions";
-import { ChemistryIllustration } from "@/components/ChemistryIllustrations";
-import { ChemistryTheoryHub } from "@/components/ChemistryTheoryHub";
+import { QuestionCard, type QuestionCardActions } from "@/components/QuestionCard";
+import {
+  AnimatedNumber,
+  ProgressBar,
+  Reveal,
+  ScoreRing,
+  useSlidingIndicator,
+} from "@/components/ui";
+import { sessionClock, useElapsedSeconds, formatTime } from "@/lib/sessionClock";
+import { celebrate, haptic, prefersReducedMotion } from "@/lib/effects";
 import {
   loadProgressData,
   sendProgressAction,
@@ -25,31 +41,22 @@ import {
   ChevronLeft,
   ChevronRight,
   Clock,
-  Eye,
-  Filter,
   Flame,
-  FlaskConical,
-  HelpCircle,
   History,
   LayoutGrid,
   ListChecks,
   Play,
   RefreshCw,
-  RotateCcw,
   Search,
   Shuffle,
   Sparkles,
   Star,
-  StickyNote,
   Target,
   Trash2,
   Trophy,
   XCircle,
-  AlertTriangle,
   Award,
-  Check,
   X,
-  FileText,
   SlidersHorizontal,
   Zap,
   List,
@@ -67,6 +74,153 @@ function shuffleArray<T>(arr: T[]): T[] {
     [copy[i], copy[j]] = [copy[j], copy[i]];
   }
   return copy;
+}
+
+// The theory hub (cheat sheets + flashcards) is only needed on its own tab, so
+// it is split out of the initial JavaScript bundle. It is fetched in the
+// background once the page is idle; if the user opens the tab before that, a
+// skeleton shows until it arrives. (A plain store instead of React.lazy, so an
+// already-downloaded hub appears immediately instead of flashing a fallback.)
+type TheoryHubComponent = ComponentType<{ onStartTopicQuiz: (topic: TopicId) => void }>;
+let theoryHubComponent: TheoryHubComponent | null = null;
+let theoryHubPromise: Promise<void> | null = null;
+const theoryHubListeners = new Set<() => void>();
+
+function loadTheoryHub(): Promise<void> {
+  if (!theoryHubPromise) {
+    theoryHubPromise = import("@/components/ChemistryTheoryHub")
+      .then((m) => {
+        theoryHubComponent = m.ChemistryTheoryHub;
+        theoryHubListeners.forEach((notify) => notify());
+      })
+      .catch((err) => {
+        theoryHubPromise = null; // allow a retry (e.g. after a network drop)
+        throw err;
+      });
+  }
+  return theoryHubPromise;
+}
+
+function subscribeTheoryHub(listener: () => void) {
+  theoryHubListeners.add(listener);
+  return () => {
+    theoryHubListeners.delete(listener);
+  };
+}
+const getTheoryHub = () => theoryHubComponent;
+const getServerTheoryHub = () => null;
+
+function LazyTheoryHub({ onStartTopicQuiz }: { onStartTopicQuiz: (topic: TopicId) => void }) {
+  const Hub = useSyncExternalStore(subscribeTheoryHub, getTheoryHub, getServerTheoryHub);
+  const [failed, setFailed] = useState(false);
+
+  const load = useCallback(() => {
+    setFailed(false);
+    loadTheoryHub().catch(() => setFailed(true));
+  }, []);
+
+  useEffect(() => {
+    if (theoryHubComponent) return;
+    let cancelled = false;
+    loadTheoryHub().catch(() => {
+      if (!cancelled) setFailed(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (Hub) {
+    // `Hub` is the one module-level component from the lazy chunk (its identity
+    // never changes once loaded), hence createElement rather than JSX.
+    return (
+      <div className="animate-rise">{React.createElement(Hub, { onStartTopicQuiz })}</div>
+    );
+  }
+
+  if (failed) {
+    return (
+      <div className="bg-white rounded-3xl border border-slate-200 p-6 sm:p-10 text-center space-y-4 animate-fadeIn">
+        <h3 className="text-base sm:text-lg font-extrabold text-slate-900">
+          Chưa tải được cẩm nang lý thuyết
+        </h3>
+        <p className="text-sm text-slate-500 max-w-md mx-auto">
+          Có vẻ kết nối mạng đang chập chờn. Hãy kiểm tra mạng rồi thử lại nhé.
+        </p>
+        <button
+          type="button"
+          onClick={load}
+          className="inline-flex items-center justify-center gap-2 px-5 min-h-[48px] rounded-2xl bg-teal-700 hover:bg-teal-800 active:scale-95 text-white font-bold text-sm transition-[background-color,scale] duration-150"
+        >
+          <RefreshCw className="w-4 h-4" />
+          Tải lại
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6" aria-busy="true" aria-label="Đang tải cẩm nang lý thuyết">
+      <div className="h-28 rounded-2xl bg-white border border-slate-200/90 animate-skeleton" />
+      <div className="h-56 rounded-2xl bg-slate-200/70 animate-skeleton" />
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className="h-72 rounded-2xl bg-white border border-slate-200/90 animate-skeleton" />
+        <div className="h-72 rounded-2xl bg-white border border-slate-200/90 animate-skeleton" />
+        <div className="h-72 rounded-2xl bg-white border border-slate-200/90 animate-skeleton" />
+      </div>
+    </div>
+  );
+}
+
+const EMPTY_OPTIONS: McqOption[] = [];
+
+// Decorative atom in the home hero: three tilted orbits, each with one electron
+const HERO_ORBITS = [
+  { tilt: 0, spin: "spin-slow", electron: "#fcd34d", r: 3.5 },
+  { tilt: 60, spin: "spin-slow-reverse", electron: "#5eead4", r: 3.5 },
+  { tilt: 120, spin: "spin-slow", electron: "#fda4af", r: 3 },
+];
+
+type PaletteState = "correct" | "wrong" | "missed" | "answered" | "idle";
+const PALETTE_STYLES: Record<PaletteState, string> = {
+  correct: "bg-emerald-600 text-white border-emerald-600 font-bold",
+  wrong: "bg-rose-600 text-white border-rose-600 font-bold",
+  missed: "bg-amber-100 text-amber-900 border-amber-300 font-semibold",
+  answered: "bg-teal-700 text-white border-teal-700 font-bold",
+  idle: "bg-slate-100 text-slate-700 border-slate-200 font-semibold",
+};
+
+const NAV_TABS = [
+  { id: "home", label: "Trang chủ", icon: LayoutGrid },
+  { id: "practice", label: "Làm bài", icon: ListChecks },
+  { id: "wrong_vault", label: "Câu sai", icon: Flame },
+  { id: "theory", label: "Lý thuyết", icon: BookOpen },
+] as const;
+
+/**
+ * Live session clock. Subscribes to the external stopwatch so that only this
+ * tiny component re-renders every second (not the whole page).
+ */
+function SessionClockText({
+  limitMinutes,
+  frozen = false,
+}: {
+  limitMinutes: number;
+  /** Show the plain elapsed time (used after the session is submitted). */
+  frozen?: boolean;
+}) {
+  const elapsed = useElapsedSeconds();
+  if (frozen || limitMinutes <= 0) {
+    return <span className="tabular-nums">{formatTime(elapsed)}</span>;
+  }
+  const remaining = Math.max(0, limitMinutes * 60 - elapsed);
+  return (
+    <span
+      className={`tabular-nums ${remaining < 60 ? "text-rose-400 animate-pulse" : ""}`}
+    >
+      Còn {formatTime(remaining)}
+    </span>
+  );
 }
 
 export default function ChemistryStudyPlatform() {
@@ -112,8 +266,6 @@ export default function ChemistryStudyPlatform() {
 
   // Exam Submission & Timer State
   const [isSubmitted, setIsSubmitted] = useState<boolean>(false);
-  const [elapsedSeconds, setElapsedSeconds] = useState<number>(0);
-  const [remainingSeconds, setRemainingSeconds] = useState<number | null>(null);
   const [streakCount, setStreakCount] = useState<number>(0);
   const [bestStreak, setBestStreak] = useState<number>(0);
   const [showNoteEditor, setShowNoteEditor] = useState<Record<number, boolean>>({});
@@ -127,6 +279,8 @@ export default function ChemistryStudyPlatform() {
   const [slideDirection, setSlideDirection] = useState<"next" | "prev" | "none">("none");
   const [showPaletteSheet, setShowPaletteSheet] = useState<boolean>(false);
   const [sessionTimeLimit, setSessionTimeLimit] = useState<number>(0);
+  // Two-step confirmation for the destructive "reset everything" action
+  const [resetArmed, setResetArmed] = useState<boolean>(false);
 
   // Refs to avoid stale closures in timers / callbacks
   const autoAdvanceRef = useRef(true);
@@ -138,9 +292,26 @@ export default function ChemistryStudyPlatform() {
   const autoAdvanceTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const questionCardRef = useRef<HTMLDivElement | null>(null);
   const touchStartRef = useRef<{ x: number; y: number } | null>(null);
-  const handleSelectMcqRef = useRef<
-    (q: ChemistryQuestion, key: "A" | "B" | "C" | "D") => void
-  >(() => {});
+  const paletteStripRef = useRef<HTMLDivElement | null>(null);
+  const paletteCloseRef = useRef<HTMLButtonElement | null>(null);
+  // Always-fresh handlers/state for stable callbacks (question cards, keyboard, timer)
+  const latestRef = useRef<{
+    actions: Pick<
+      QuestionCardActions,
+      "selectMcq" | "selectTf" | "gradeTfNow" | "retry" | "toggleBookmark" | "saveNote"
+    >;
+    optionPermutations: Record<number, McqOption[]>;
+    submit: () => void;
+  } | null>(null);
+
+  // Typing in the search box stays responsive: the list filters at lower priority
+  const deferredSearchQuery = useDeferredValue(searchQuery);
+
+  // Sliding "active tab" pills
+  const desktopNavRef = useSlidingIndicator<HTMLElement>(activeNav);
+  const layoutSwitchRef = useSlidingIndicator<HTMLDivElement>(
+    `${activeNav}:${workspaceLayout}`
+  );
 
   // Load initial progress + sessions (server API, with a localStorage
   // fallback when the app is deployed as a static site e.g. GitHub Pages)
@@ -163,19 +334,36 @@ export default function ChemistryStudyPlatform() {
     fetchInitialData();
   }, []);
 
-  // Timer Effect when on Practice tab and not submitted
-  // (single interval; deps intentionally exclude the ticking values to avoid
-  // recreating the interval every second)
+  // Session stopwatch: runs on the Practice tab until the session is submitted.
+  // The elapsed time lives in an external store (see lib/sessionClock), so a
+  // tick re-renders only the clock labels instead of the whole page.
+  // When a time limit is set, the session is auto-submitted at 00:00.
   useEffect(() => {
     if (activeNav !== "practice" || isSubmitted) return;
     const interval = setInterval(() => {
-      setElapsedSeconds((prev) => prev + 1);
-      setRemainingSeconds((prev) =>
-        prev === null ? null : Math.max(0, prev - 1)
-      );
+      const elapsed = sessionClock.tick();
+      if (sessionTimeLimit > 0 && elapsed >= sessionTimeLimit * 60) {
+        latestRef.current?.submit();
+      }
     }, 1000);
     return () => clearInterval(interval);
-  }, [activeNav, isSubmitted]);
+  }, [activeNav, isSubmitted, sessionTimeLimit]);
+
+  // Warm up the lazily loaded theory tab while the browser is idle, so the
+  // first switch to it is instant.
+  useEffect(() => {
+    const warm = () => {
+      loadTheoryHub().catch(() => {
+        // Offline / flaky network — the tab will retry when opened.
+      });
+    };
+    if (typeof window.requestIdleCallback === "function") {
+      const id = window.requestIdleCallback(warm, { timeout: 4000 });
+      return () => window.cancelIdleCallback(id);
+    }
+    const id = window.setTimeout(warm, 2500);
+    return () => window.clearTimeout(id);
+  }, []);
 
   // Keep refs in sync for use inside timers / event handlers
   useEffect(() => {
@@ -270,8 +458,12 @@ export default function ChemistryStudyPlatform() {
         const next = streakCount + 1;
         setStreakCount(next);
         if (next > bestStreak) setBestStreak(next);
+        haptic(12);
+        // Small celebration every 5 correct answers in a row
+        if (next % 5 === 0) void celebrate("streak");
       } else {
         setStreakCount(0);
+        haptic([30, 50, 30]);
       }
     },
     [streakCount, bestStreak]
@@ -352,12 +544,15 @@ export default function ChemistryStudyPlatform() {
         e.preventDefault();
         goToQuestion(currentIdxRef.current - 1, "prev");
       } else if (/^[a-dA-D]$/.test(e.key)) {
+        if (e.ctrlKey || e.metaKey || e.altKey) return;
         const q = activeQueueRef.current[currentIdxRef.current];
         if (q && q.type === "mcq") {
-          handleSelectMcqRef.current(
-            q,
-            e.key.toUpperCase() as "A" | "B" | "C" | "D"
-          );
+          // The letter refers to the position shown on screen, which differs
+          // from the original option key when answers are shuffled.
+          const shown =
+            latestRef.current?.optionPermutations[q.id] || q.options || [];
+          const opt = shown["ABCD".indexOf(e.key.toUpperCase())];
+          if (opt) latestRef.current?.actions.selectMcq(q, opt.key);
         }
       }
     };
@@ -395,13 +590,12 @@ export default function ChemistryStudyPlatform() {
       setCheckedQuestions({});
       setShowHint({});
       setIsSubmitted(false);
-      setElapsedSeconds(0);
+      sessionClock.reset();
       setStreakCount(0);
       setBestStreak(0);
       setSessionTimeLimit(finalTime);
       setSlideDirection("none");
       setShowPaletteSheet(false);
-      setRemainingSeconds(finalTime > 0 ? finalTime * 60 : null);
       setSessionTitle(opts.title);
       setSessionModeTag(opts.modeTag);
       setFeedbackMode(finalMode);
@@ -487,9 +681,6 @@ export default function ChemistryStudyPlatform() {
       scheduleAutoAdvance(idx, 1800);
     }
   };
-  useEffect(() => {
-    handleSelectMcqRef.current = handleSelectMcq;
-  });
 
   // Chấm điểm câu Đúng/Sai — dùng chung cho tự chấm khi đủ 4 ý và nút "Chấm ngay"
   // (trước đây nút "Chấm ngay" chỉ hiện đáp án mà không lưu tiến độ/streak)
@@ -650,15 +841,7 @@ export default function ChemistryStudyPlatform() {
       maxRawPoints > 0 ? Number(((rawPoints / maxRawPoints) * 10).toFixed(2)) : 0;
 
     if (normalizedScore >= 7.0) {
-      try {
-        confetti({
-          particleCount: 80,
-          spread: 70,
-          origin: { y: 0.6 },
-        });
-      } catch {
-        // ignore confetti error in headless environments
-      }
+      void celebrate("result");
     }
 
     // Save session (PostgreSQL when available, localStorage on static hosting)
@@ -671,7 +854,7 @@ export default function ChemistryStudyPlatform() {
         correctCount: correctQCount,
         score: normalizedScore,
         maxScore: 10,
-        durationSeconds: elapsedSeconds,
+        durationSeconds: sessionClock.get(),
         shuffled: shuffleQuestions,
       });
       if (session) {
@@ -690,17 +873,8 @@ export default function ChemistryStudyPlatform() {
     syncQuestionProgress,
     sessionModeTag,
     selectedTopics,
-    elapsedSeconds,
     shuffleQuestions,
   ]);
-
-  // Auto-submit if countdown reaches 0
-  useEffect(() => {
-    if (remainingSeconds === 0 && !isSubmitted && activeNav === "practice") {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional auto-submit when the countdown hits zero
-      handleSubmitSession();
-    }
-  }, [remainingSeconds, isSubmitted, activeNav, handleSubmitSession]);
 
   // Global Statistics Computed from progressMap
   const stats = useMemo(() => {
@@ -748,8 +922,8 @@ export default function ChemistryStudyPlatform() {
   const explorerQuestions = useMemo(() => {
     return CHEMISTRY_QUESTIONS.filter((q) => {
       if (explorerTopic !== "all" && q.topic !== explorerTopic) return false;
-      if (!searchQuery.trim()) return true;
-      const qLower = searchQuery.toLowerCase();
+      if (!deferredSearchQuery.trim()) return true;
+      const qLower = deferredSearchQuery.trim().toLowerCase();
       return (
         q.code.toLowerCase().includes(qLower) ||
         q.stem.toLowerCase().includes(qLower) ||
@@ -757,7 +931,7 @@ export default function ChemistryStudyPlatform() {
         q.explanation.toLowerCase().includes(qLower)
       );
     });
-  }, [explorerTopic, searchQuery]);
+  }, [explorerTopic, deferredSearchQuery]);
 
   // Current Session Live Score Summary
   const sessionSummary = useMemo(() => {
@@ -807,13 +981,6 @@ export default function ChemistryStudyPlatform() {
     return { answered, correct, wrong, rawPoints, maxPoints, scale10 };
   }, [activeQueue, isQuestionAnswered, checkedQuestions, isSubmitted, mcqAnswers, tfAnswers]);
 
-  // Format seconds as MM:SS
-  const formatTime = (sec: number) => {
-    const m = Math.floor(sec / 60);
-    const s = sec % 60;
-    return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
-  };
-
   // Toggle Bookmark on a Question
   const toggleBookmark = (qId: number) => {
     const current = progressMap[qId]?.bookmarked || false;
@@ -827,575 +994,400 @@ export default function ChemistryStudyPlatform() {
     setShowNoteEditor((prev) => ({ ...prev, [qId]: false }));
   };
 
-  // Render a Single Question Card (used in both Single View and Full-Sheet View)
-  const renderQuestionCard = (q: ChemistryQuestion, idxInQueue: number) => {
-    const prog = progressMap[q.id];
-    const isChecked = Boolean(checkedQuestions[q.id] || isSubmitted);
-    const isBookmarked = Boolean(prog?.bookmarked);
-    const displayedOptions =
-      q.type === "mcq" ? optionPermutations[q.id] || q.options || [] : [];
-    const displayLabels: ("A" | "B" | "C" | "D")[] = ["A", "B", "C", "D"];
+  // Keep the "latest" bag in sync after every render (read only from event
+  // handlers / timers, never during render).
+  useEffect(() => {
+    latestRef.current = {
+      actions: {
+        selectMcq: handleSelectMcq,
+        selectTf: handleSelectTf,
+        gradeTfNow: handleGradeTfNow,
+        retry: handleRetrySingleQuestion,
+        toggleBookmark,
+        saveNote: savePersonalNote,
+      },
+      optionPermutations,
+      submit: handleSubmitSession,
+    };
+  });
 
-    return (
-      <div
-        key={q.id}
-        id={`question-card-${q.id}`}
-        className="bg-white rounded-3xl border border-slate-200/90 shadow-sm overflow-hidden transition-all"
-      >
-        {/* Question Header Bar */}
-        <div className="px-5 sm:px-7 py-4 bg-slate-50/90 border-b border-slate-200/80 flex flex-wrap items-center justify-between gap-3">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-xl bg-teal-700 text-white font-mono text-xs sm:text-sm font-bold shadow-xs">
-              Câu {idxInQueue + 1}/{activeQueue.length}
-              {shuffleQuestions && (
-                <span className="text-teal-200 font-normal">({q.code} gốc)</span>
-              )}
-            </span>
-            <span className="px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-slate-700 text-xs font-semibold">
-              {q.topicLabel}
-            </span>
-            <span
-              className={`px-2.5 py-1 rounded-lg text-xs font-semibold ${
-                q.difficulty === "Nhận biết"
-                  ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
-                  : q.difficulty === "Thông hiểu"
-                  ? "bg-sky-50 text-sky-700 border border-sky-200"
-                  : "bg-amber-50 text-amber-800 border border-amber-200"
-              }`}
-            >
-              {q.difficulty}
-            </span>
-            {prog?.status === "wrong" && (
-              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-rose-50 text-rose-700 border border-rose-200 text-xs font-semibold">
-                <AlertTriangle className="w-3.5 h-3.5" />
-                Hay sai ({prog.wrongCount} lần)
-              </span>
-            )}
-            {prog?.status === "mastered" && (
-              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200 text-xs font-semibold">
-                <CheckCircle2 className="w-3.5 h-3.5" />
-                Đã thuộc
-              </span>
-            )}
-          </div>
+  // Callbacks handed to every <QuestionCard/>. Their identity never changes,
+  // so memoised cards re-render only when their own data changes.
+  const cardActions = useMemo<QuestionCardActions>(
+    () => ({
+      selectMcq: (q, key) => latestRef.current?.actions.selectMcq(q, key),
+      selectTf: (q, key, value) => latestRef.current?.actions.selectTf(q, key, value),
+      gradeTfNow: (q) => latestRef.current?.actions.gradeTfNow(q),
+      retry: (qId) => latestRef.current?.actions.retry(qId),
+      toggleBookmark: (qId) => latestRef.current?.actions.toggleBookmark(qId),
+      saveNote: (qId) => latestRef.current?.actions.saveNote(qId),
+      toggleHint: (qId) =>
+        setShowHint((prev) => ({ ...prev, [qId]: !prev[qId] })),
+      toggleNote: (qId, savedNote) => {
+        // Don't slide to the next question while the student is writing a note
+        cancelAutoAdvance();
+        setNoteDrafts((prev) => ({ ...prev, [qId]: prev[qId] ?? savedNote }));
+        setShowNoteEditor((prev) => ({ ...prev, [qId]: !prev[qId] }));
+      },
+      editNote: (qId, savedNote) => {
+        cancelAutoAdvance();
+        setNoteDrafts((prev) => ({ ...prev, [qId]: savedNote }));
+        setShowNoteEditor((prev) => ({ ...prev, [qId]: true }));
+      },
+      changeNoteDraft: (qId, text) =>
+        setNoteDrafts((prev) => ({ ...prev, [qId]: text })),
+      closeNote: (qId) =>
+        setShowNoteEditor((prev) => ({ ...prev, [qId]: false })),
+    }),
+    [cancelAutoAdvance]
+  );
 
-          {/* Right Action Icons: Hint, Note, Bookmark, Retry */}
-          <div className="flex items-center gap-1.5">
-            <button
-              type="button"
-              onClick={() =>
-                setShowHint((prev) => ({ ...prev, [q.id]: !prev[q.id] }))
-              }
-              className={`inline-flex items-center gap-1 px-2.5 py-1.5 min-h-[40px] min-w-[40px] justify-center rounded-xl text-xs font-semibold border transition-all active:scale-95 ${
-                showHint[q.id]
-                  ? "bg-amber-100 text-amber-900 border-amber-300"
-                  : "bg-white text-slate-600 border-slate-200 hover:bg-slate-100"
-              }`}
-              title="Xem gợi ý công thức"
-            >
-              <HelpCircle className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Gợi ý</span>
-            </button>
+  const renderQuestionCard = (
+    q: ChemistryQuestion,
+    idxInQueue: number,
+    className?: string
+  ) => (
+    <QuestionCard
+      key={q.id}
+      q={q}
+      index={idxInQueue}
+      total={activeQueue.length}
+      showOriginalCode={shuffleQuestions}
+      instantFeedback={feedbackMode === "instant"}
+      isSubmitted={isSubmitted}
+      isChecked={Boolean(checkedQuestions[q.id] || isSubmitted)}
+      prog={progressMap[q.id]}
+      mcqAnswer={mcqAnswers[q.id]}
+      tfAnswer={tfAnswers[q.id]}
+      options={
+        q.type === "mcq"
+          ? optionPermutations[q.id] || q.options || EMPTY_OPTIONS
+          : EMPTY_OPTIONS
+      }
+      hintOpen={Boolean(showHint[q.id])}
+      noteOpen={Boolean(showNoteEditor[q.id])}
+      noteDraft={noteDrafts[q.id]}
+      actions={cardActions}
+      className={className}
+    />
+  );
 
-            <button
-              type="button"
-              onClick={() => {
-                setNoteDrafts((prev) => ({
-                  ...prev,
-                  [q.id]: prev[q.id] ?? prog?.personalNote ?? "",
-                }));
-                setShowNoteEditor((prev) => ({ ...prev, [q.id]: !prev[q.id] }));
-              }}
-              className={`inline-flex items-center gap-1 px-2.5 py-1.5 min-h-[40px] min-w-[40px] justify-center rounded-xl text-xs font-semibold border transition-all active:scale-95 ${
-                prog?.personalNote
-                  ? "bg-teal-50 text-teal-800 border-teal-200"
-                  : "bg-white text-slate-600 border-slate-200 hover:bg-slate-100"
-              }`}
-              title="Ghi chú cá nhân"
-            >
-              <StickyNote className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Ghi chú</span>
-            </button>
+  // Mobile question palette (bottom sheet): lock page scroll, close on Escape,
+  // move focus into the dialog.
+  useEffect(() => {
+    if (!showPaletteSheet) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    paletteCloseRef.current?.focus({ preventScroll: true });
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setShowPaletteSheet(false);
+    };
+    // The sheet only exists below the `lg` breakpoint (desktop has the sidebar)
+    const desktop = window.matchMedia("(min-width: 64rem)");
+    const onDesktop = () => {
+      if (desktop.matches) setShowPaletteSheet(false);
+    };
+    window.addEventListener("keydown", onKey);
+    desktop.addEventListener("change", onDesktop);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", onKey);
+      desktop.removeEventListener("change", onDesktop);
+    };
+  }, [showPaletteSheet]);
 
-            <button
-              type="button"
-              onClick={() => toggleBookmark(q.id)}
-              className={`inline-flex items-center gap-1 px-2.5 py-1.5 min-h-[40px] min-w-[40px] justify-center rounded-xl text-xs font-semibold border transition-all active:scale-95 ${
-                isBookmarked
-                  ? "bg-amber-400 text-slate-950 border-amber-500 shadow-xs"
-                  : "bg-white text-slate-600 border-slate-200 hover:bg-slate-100"
-              }`}
-              title="Đánh dấu sao câu hỏi quan trọng"
-            >
-              <Star className={`w-3.5 h-3.5 ${isBookmarked ? "fill-current" : ""}`} />
-              <span className="hidden sm:inline">{isBookmarked ? "Đã lưu" : "Đánh dấu"}</span>
-            </button>
+  // Keep the current question chip centred in the horizontal palette strip
+  useEffect(() => {
+    if (activeNav !== "practice" || workspaceLayout !== "single") return;
+    const strip = paletteStripRef.current;
+    if (!strip) return;
+    const chip = strip.querySelector<HTMLElement>('[data-current="true"]');
+    if (!chip) return;
+    const left = chip.offsetLeft - (strip.clientWidth - chip.offsetWidth) / 2;
+    strip.scrollTo({ left: Math.max(0, left), behavior: "smooth" });
+  }, [currentIdx, activeNav, workspaceLayout, activeQueue]);
 
-            {feedbackMode === "instant" && isChecked && !isSubmitted && (
-              <button
-                type="button"
-                onClick={() => handleRetrySingleQuestion(q.id)}
-                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs font-semibold bg-white text-teal-700 border border-teal-200 hover:bg-teal-50 transition-all"
-                title="Làm lại câu này"
-              >
-                <RotateCcw className="w-3.5 h-3.5" />
-                Làm lại
-              </button>
-            )}
-          </div>
-        </div>
+  // Disarm the "reset everything" confirmation after a few seconds
+  useEffect(() => {
+    if (!resetArmed) return;
+    const id = window.setTimeout(() => setResetArmed(false), 4000);
+    return () => window.clearTimeout(id);
+  }, [resetArmed]);
 
-        {/* Question Body */}
-        <div className="p-4 sm:p-7 space-y-5">
-          {/* Quick Formula Hint Box */}
-          {showHint[q.id] && (
-            <div className="p-3.5 rounded-2xl bg-amber-50/90 border border-amber-200 text-amber-950 text-xs sm:text-sm flex items-center justify-between animate-fadeIn">
-              <div className="flex items-center gap-2">
-                <Sparkles className="w-4 h-4 text-amber-600 shrink-0" />
-                <span>
-                  <strong>Gợi ý trọng tâm:</strong> Công thức / Từ khóa liên quan là{" "}
-                  <code className="px-2 py-0.5 rounded bg-amber-200/70 font-mono font-bold">
-                    {q.keyFormula}
-                  </code>
-                </span>
-              </div>
-            </div>
-          )}
+  // Tab navigation: switch view and start at the top of the new page
+  const navigateTo = useCallback((tab: NavTab) => {
+    setActiveNav(tab);
+    setShowPaletteSheet(false);
+    window.scrollTo({ top: 0, behavior: "instant" });
+  }, []);
 
-          {/* Question Stem Text */}
-          <div className="text-base sm:text-lg font-semibold text-slate-900 leading-relaxed">
-            <span className="text-teal-700 font-bold mr-1.5">{q.code}:</span>
-            {q.stem}
-          </div>
+  const sessionPercent = activeQueue.length
+    ? (sessionSummary.answered / activeQueue.length) * 100
+    : 0;
 
-          {/* Sub-items (Reactions, Experimental Steps, Statement Lists) */}
-          {q.subItems && q.subItems.length > 0 && (
-            <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200/90 space-y-2 text-sm sm:text-base text-slate-800 font-medium">
-              {q.subItems.map((line, i) => (
-                <div
-                  key={i}
-                  className="pl-3 border-l-2 border-teal-600/60 leading-relaxed font-mono text-xs sm:text-sm"
-                >
-                  {line}
-                </div>
-              ))}
-            </div>
-          )}
+  // Status of every question in the palette (strip, sidebar and bottom sheet)
+  const paletteStates = useMemo<PaletteState[]>(
+    () =>
+      activeQueue.map((q) => {
+        const answered = isQuestionAnswered(q);
+        if (checkedQuestions[q.id] || isSubmitted) {
+          if (isQuestionCorrect(q)) return "correct";
+          return answered ? "wrong" : "missed";
+        }
+        return answered ? "answered" : "idle";
+      }),
+    [activeQueue, checkedQuestions, isSubmitted, isQuestionAnswered, isQuestionCorrect]
+  );
 
-          {/* Custom Precision SVG Lab Illustration (if present) */}
-          {q.illustrationId && (
-            <ChemistryIllustration
-              id={q.illustrationId}
-              caption={q.illustrationCaption}
-              // Caption/notes stay locked until the question is graded so the
-              // figure never gives away part of the answer.
-              revealCaption={isChecked || isSubmitted}
-            />
-          )}
-
-          {/* ==================== PART I: 4-OPTION MULTIPLE CHOICE ==================== */}
-          {q.type === "mcq" && (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5 pt-1">
-              {displayedOptions.map((opt, optIdx) => {
-                const displayLetter = displayLabels[optIdx] || opt.key;
-                const userSelectedOriginalKey = mcqAnswers[q.id];
-                const isSelected = userSelectedOriginalKey === opt.key;
-                const isRightOption = opt.key === q.correctOption;
-
-                let cardStyle =
-                  "bg-white border-slate-200/90 text-slate-800 hover:border-teal-500 hover:bg-teal-50/30";
-                let badgeStyle =
-                  "bg-slate-100 text-slate-700 border border-slate-200 group-hover:bg-teal-600 group-hover:text-white";
-
-                if (isChecked) {
-                  if (isRightOption) {
-                    cardStyle =
-                      "bg-emerald-50/90 border-emerald-500 text-emerald-950 ring-2 ring-emerald-500/20 shadow-xs";
-                    badgeStyle = "bg-emerald-600 text-white border-emerald-600";
-                  } else if (isSelected && !isRightOption) {
-                    cardStyle =
-                      "bg-rose-50/90 border-rose-400 text-rose-950 ring-2 ring-rose-400/20";
-                    badgeStyle = "bg-rose-600 text-white border-rose-600";
-                  } else {
-                    cardStyle = "bg-slate-50/60 border-slate-200 text-slate-400 opacity-75";
-                    badgeStyle = "bg-slate-200 text-slate-500";
-                  }
-                } else if (isSelected) {
-                  cardStyle =
-                    "bg-teal-50/90 border-teal-600 text-teal-950 ring-2 ring-teal-500/20 shadow-xs";
-                  badgeStyle = "bg-teal-700 text-white border-teal-700";
-                }
-
-                return (
-                  <button
-                    key={opt.key}
-                    type="button"
-                    onClick={() => handleSelectMcq(q, opt.key)}
-                    disabled={isChecked}
-                    className={`group relative flex items-center justify-between gap-3 p-4 min-h-[56px] rounded-2xl border-2 text-left transition-all duration-150 active:scale-[0.98] ${cardStyle}`}
-                  >
-                    <div className="flex items-center gap-3.5 min-w-0">
-                      <span
-                        className={`w-9 h-9 rounded-xl font-mono text-sm font-bold flex items-center justify-center shrink-0 transition-colors ${badgeStyle} ${
-                          isChecked && isRightOption ? "underline decoration-2" : ""
-                        }`}
-                      >
-                        {displayLetter}
-                      </span>
-                      <span className="text-sm sm:text-base font-medium leading-snug break-words">
-                        {opt.text}
-                      </span>
-                    </div>
-
-                    {isChecked && isRightOption && (
-                      <span className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-emerald-600 text-white text-xs font-bold shrink-0">
-                        <Check className="w-3.5 h-3.5" /> Đúng
-                      </span>
-                    )}
-                    {isChecked && isSelected && !isRightOption && (
-                      <span className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-rose-600 text-white text-xs font-bold shrink-0">
-                        <X className="w-3.5 h-3.5" /> Sai
-                      </span>
-                    )}
-                  </button>
-                );
-              })}
-            </div>
-          )}
-
-          {/* ==================== PART II: TRUE / FALSE CLUSTER (4 STATEMENTS) ==================== */}
-          {q.type === "true_false" && q.statements && (
-            <div className="space-y-3 pt-1">
-              <div className="flex items-center justify-between text-xs font-semibold text-slate-500 px-2">
-                <span>Chọn Đúng hoặc Sai cho từng mệnh đề a), b), c), d):</span>
-                {feedbackMode === "instant" && !isChecked && (
-                  <button
-                    type="button"
-                    onClick={() => handleGradeTfNow(q)}
-                    className="text-teal-700 hover:underline font-bold min-h-[36px]"
-                  >
-                    Chấm điểm câu này ngay →
-                  </button>
-                )}
-              </div>
-
-              {q.statements.map((st) => {
-                const userChoice = tfAnswers[q.id]?.[st.key];
-                const isStatementMatched = userChoice === st.isTrue;
-
-                // When checked, highlight TRUE statements in yellow like the original exam worksheet!
-                let rowStyle = "bg-slate-50/70 border-slate-200/90";
-                if (isChecked) {
-                  if (st.isTrue) {
-                    rowStyle =
-                      "bg-[#FEF08A]/55 border-amber-400 shadow-2xs"; // Yellow highlighter effect matching exam sheet!
-                  } else {
-                    rowStyle = "bg-white border-slate-200";
-                  }
-                } else if (userChoice !== undefined) {
-                  rowStyle = "bg-teal-50/40 border-teal-300";
-                }
-
-                return (
-                  <div
-                    key={st.key}
-                    className={`p-4 rounded-2xl border-2 transition-all space-y-2.5 ${rowStyle}`}
-                  >
-                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                      <div className="text-sm sm:text-base text-slate-900 leading-relaxed flex-1">
-                        <span className="font-mono font-bold text-teal-800 mr-2">
-                          {st.key}.
-                        </span>
-                        <span
-                          className={
-                            isChecked && st.isTrue
-                              ? "underline decoration-slate-800 decoration-1 font-semibold"
-                              : "font-medium"
-                          }
-                        >
-                          {st.text}
-                        </span>
-                      </div>
-
-                      {/* True / False Toggle Buttons */}
-                      <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
-                        <button
-                          type="button"
-                          disabled={isChecked}
-                          onClick={() => handleSelectTf(q, st.key, true)}
-                          className={`px-4 py-2 min-h-[44px] rounded-xl font-mono text-xs font-bold border transition-all active:scale-95 ${
-                            userChoice === true
-                              ? isChecked
-                                ? st.isTrue
-                                  ? "bg-emerald-600 text-white border-emerald-600 ring-2 ring-emerald-400"
-                                  : "bg-rose-600 text-white border-rose-600"
-                                : "bg-teal-700 text-white border-teal-700"
-                              : isChecked && st.isTrue
-                              ? "bg-emerald-100 text-emerald-900 border-emerald-400"
-                              : "bg-white text-slate-700 border-slate-300 hover:bg-slate-100"
-                          }`}
-                        >
-                          ĐÚNG
-                        </button>
-                        <button
-                          type="button"
-                          disabled={isChecked}
-                          onClick={() => handleSelectTf(q, st.key, false)}
-                          className={`px-4 py-2 min-h-[44px] rounded-xl font-mono text-xs font-bold border transition-all active:scale-95 ${
-                            userChoice === false
-                              ? isChecked
-                                ? !st.isTrue
-                                  ? "bg-emerald-600 text-white border-emerald-600 ring-2 ring-emerald-400"
-                                  : "bg-rose-600 text-white border-rose-600"
-                                : "bg-teal-700 text-white border-teal-700"
-                              : isChecked && !st.isTrue
-                              ? "bg-emerald-100 text-emerald-900 border-emerald-400"
-                              : "bg-white text-slate-700 border-slate-300 hover:bg-slate-100"
-                          }`}
-                        >
-                          SAI
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* Individual Statement Explanation when Checked */}
-                    {isChecked && (
-                      <div className="pt-2 border-t border-slate-200/70 flex items-start gap-2 text-xs sm:text-sm text-slate-700">
-                        {userChoice !== undefined ? (
-                          isStatementMatched ? (
-                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-600 text-white font-bold text-[11px] shrink-0 mt-0.5">
-                              <Check className="w-3 h-3" /> Bạn chọn Đúng
-                            </span>
-                          ) : (
-                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-rose-600 text-white font-bold text-[11px] shrink-0 mt-0.5">
-                              <X className="w-3 h-3" /> Bạn chọn Sai
-                            </span>
-                          )
-                        ) : (
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-slate-500 text-white font-bold text-[11px] shrink-0 mt-0.5">
-                            Đáp án: {st.isTrue ? "ĐÚNG" : "SAI"}
-                          </span>
-                        )}
-                        <span className="leading-relaxed">{st.explanation}</span>
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          )}
-
-          {/* ==================== DETAILED EXPLANATION PANEL ==================== */}
-          {isChecked && (
-            <div className="mt-4 p-5 rounded-2xl bg-gradient-to-br from-teal-50/90 via-emerald-50/50 to-slate-50 border border-teal-200/90 space-y-2 animate-fadeIn">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="inline-flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-teal-800">
-                  <FlaskConical className="w-4 h-4 text-teal-600" />
-                  GIẢI THÍCH HÓA HỌC CHI TIẾT &amp; GHI NHỚ
-                </div>
-                <span className="px-2.5 py-0.5 rounded-md bg-white border border-teal-200 font-mono text-xs font-bold text-teal-900">
-                  Trọng tâm: {q.keyFormula}
-                </span>
-              </div>
-              <p className="text-sm sm:text-base text-slate-800 whitespace-pre-line leading-relaxed">
-                {q.explanation}
-              </p>
-            </div>
-          )}
-
-          {/* ==================== PERSONAL STUDY NOTE EDITOR / DISPLAY ==================== */}
-          {showNoteEditor[q.id] ? (
-            <div className="p-4 rounded-2xl bg-amber-50/60 border border-amber-200 space-y-3 animate-fadeIn">
-              <label className="block text-xs font-bold uppercase text-amber-900">
-                Ghi chú cá nhân cho {q.code} (Lưu tự động vào Cơ sở dữ liệu):
-              </label>
-              <textarea
-                rows={2}
-                value={noteDrafts[q.id] ?? prog?.personalNote ?? ""}
-                onChange={(e) =>
-                  setNoteDrafts((prev) => ({ ...prev, [q.id]: e.target.value }))
-                }
-                placeholder="Nhập mẹo nhớ nhanh, lỗi sai cần tránh ở câu này..."
-                className="w-full rounded-xl border border-amber-300 bg-white p-3 text-sm text-slate-800 focus:outline-none focus:ring-2 focus:ring-teal-600"
-              />
-              <div className="flex justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() =>
-                    setShowNoteEditor((prev) => ({ ...prev, [q.id]: false }))
-                  }
-                  className="px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-600 hover:bg-slate-200/60"
-                >
-                  Đóng
-                </button>
-                <button
-                  type="button"
-                  onClick={() => savePersonalNote(q.id)}
-                  className="px-4 py-1.5 rounded-lg text-xs font-bold bg-teal-700 text-white hover:bg-teal-800"
-                >
-                  Lưu ghi chú
-                </button>
-              </div>
-            </div>
-          ) : (
-            prog?.personalNote && (
-              <div className="p-3.5 rounded-xl bg-amber-50/80 border border-amber-200/90 flex items-start justify-between gap-3 text-xs sm:text-sm text-amber-950">
-                <div className="flex items-start gap-2">
-                  <StickyNote className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-                  <div>
-                    <strong className="font-semibold">Ghi chú của bạn: </strong>
-                    {prog.personalNote}
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setNoteDrafts((prev) => ({
-                      ...prev,
-                      [q.id]: prog.personalNote,
-                    }));
-                    setShowNoteEditor((prev) => ({ ...prev, [q.id]: true }));
-                  }}
-                  className="text-xs font-semibold text-amber-800 underline shrink-0"
-                >
-                  Sửa
-                </button>
-              </div>
-            )
-          )}
-        </div>
-      </div>
-    );
+  // Jump from a palette: switch card in "Từng câu", scroll to the card in "Tờ đề"
+  const jumpToQuestion = (idx: number) => {
+    if (workspaceLayout === "single") {
+      goToQuestion(idx);
+      return;
+    }
+    const q = activeQueue[idx];
+    if (!q) return;
+    const el = document.getElementById(`question-card-${q.id}`);
+    if (!el) return;
+    // Nearby card: glide to it. Far-away card: jump straight there — a smooth
+    // scroll across dozens of cards is slow, and because off-screen cards are
+    // not rendered yet (content-visibility) their real height is only known
+    // once they are, so the position is re-aligned after layout settles.
+    const far = Math.abs(el.getBoundingClientRect().top) > window.innerHeight * 1.5;
+    if (far || prefersReducedMotion()) {
+      el.scrollIntoView({ behavior: "instant", block: "start" });
+      let passes = 0;
+      const realign = () => {
+        el.scrollIntoView({ behavior: "instant", block: "start" });
+        if (++passes < 4) requestAnimationFrame(realign);
+      };
+      requestAnimationFrame(realign);
+    } else {
+      el.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+    // Brief highlight so the eye finds the card it landed on
+    el.classList.remove("animate-target-flash");
+    void el.offsetWidth;
+    el.classList.add("animate-target-flash");
   };
 
+  const renderPaletteLegend = () => (
+    <div className="grid grid-cols-2 gap-2 text-[11px] font-medium text-slate-600">
+      <div className="flex items-center gap-1.5">
+        <span className="w-3 h-3 rounded bg-emerald-500 inline-block" />
+        <span>Làm đúng ({sessionSummary.correct})</span>
+      </div>
+      <div className="flex items-center gap-1.5">
+        <span className="w-3 h-3 rounded bg-rose-500 inline-block" />
+        <span>Làm sai ({sessionSummary.wrong})</span>
+      </div>
+      <div className="flex items-center gap-1.5">
+        <span className="w-3 h-3 rounded bg-teal-600 inline-block" />
+        <span>Đã chọn ({sessionSummary.answered})</span>
+      </div>
+      <div className="flex items-center gap-1.5">
+        <span className="w-3 h-3 rounded bg-slate-200 inline-block" />
+        <span>Chưa làm ({activeQueue.length - sessionSummary.answered})</span>
+      </div>
+    </div>
+  );
+
+  // Feedback mode + answer shuffling (desktop sidebar and mobile bottom sheet)
+  const renderQuickControls = () => (
+    <div className="space-y-2">
+      <button
+        type="button"
+        onClick={() => {
+          cancelAutoAdvance();
+          setFeedbackMode((m) => (m === "instant" ? "exam" : "instant"));
+        }}
+        className="w-full py-2.5 px-3 min-h-[44px] rounded-xl bg-slate-50 hover:bg-slate-100 active:scale-[0.99] border border-slate-200 text-xs font-semibold text-slate-700 flex items-center justify-between gap-3 transition-[background-color,scale] duration-150"
+      >
+        <span>Đổi chế độ phản hồi:</span>
+        <strong className="text-teal-700">
+          {feedbackMode === "instant" ? "Giải thích ngay" : "Nộp bài"}
+        </strong>
+      </button>
+
+      <label className="flex items-center justify-between gap-3 py-2.5 px-3 min-h-[44px] rounded-xl bg-slate-50 border border-slate-200 cursor-pointer text-xs font-semibold text-slate-700">
+        <span>Xáo trộn đáp án A-B-C-D</span>
+        <input
+          type="checkbox"
+          checked={shuffleOptions}
+          onChange={(e) => {
+            const nextVal = e.target.checked;
+            setShuffleOptions(nextVal);
+            buildPermutations(activeQueue, nextVal);
+          }}
+          className="w-5 h-5 accent-teal-700 rounded shrink-0"
+        />
+      </label>
+    </div>
+  );
+
   return (
-    <div className="min-h-screen flex flex-col bg-chem-grid">
+    <div className="min-h-dvh flex flex-col bg-chem-grid">
       {/* ==================== STICKY TOP NAVIGATION HEADER ==================== */}
-      <header className="sticky top-0 z-40 bg-white/90 backdrop-blur-md border-b border-slate-200/90 shadow-2xs safe-top">
-        <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 h-14 md:h-16 flex items-center justify-between gap-2 sm:gap-3">
+      <header className="sticky short:relative top-0 z-40 bg-white/90 backdrop-blur-md border-b border-slate-200/90 shadow-2xs safe-top">
+        <div className="max-w-7xl 2xl:max-w-[1440px] mx-auto page-gutter h-14 md:h-16 short:h-12 flex items-center justify-between gap-2 sm:gap-3">
           {/* Brand Logo */}
-          <div
-            onClick={() => setActiveNav("home")}
-            className="flex items-center gap-2.5 cursor-pointer group shrink-0 min-w-0"
+          <button
+            type="button"
+            onClick={() => navigateTo("home")}
+            aria-label="ChemLab 11 — về Trang chủ"
+            className="flex items-center gap-2.5 cursor-pointer group shrink-0 min-w-0 text-left rounded-2xl"
           >
-            <div className="w-9 h-9 md:w-10 md:h-10 rounded-2xl bg-gradient-to-br from-teal-600 to-slate-900 flex items-center justify-center text-white shadow-sm group-hover:scale-105 transition-transform shrink-0">
-              <Atom className="w-5 h-5 md:w-6 md:h-6 text-amber-300" />
-            </div>
-            <div className="min-w-0">
-              <div className="flex items-center gap-2">
+            <span className="w-9 h-9 md:w-10 md:h-10 rounded-2xl bg-gradient-to-br from-teal-600 to-slate-900 flex items-center justify-center text-white shadow-sm group-hover:scale-105 group-active:scale-95 transition-transform duration-300 ease-spring shrink-0">
+              <Atom className="w-5 h-5 md:w-6 md:h-6 text-amber-300 transition-transform duration-700 ease-smooth group-hover:rotate-180" />
+            </span>
+            <span className="min-w-0 block">
+              <span className="flex items-center gap-2">
                 <span className="font-extrabold text-base md:text-lg tracking-tight text-slate-900 whitespace-nowrap">
                   ChemLab <span className="text-teal-700">11</span>
                 </span>
-                <span className="hidden sm:inline-flex items-center px-2 py-0.5 rounded-md bg-amber-100 text-amber-900 font-mono text-[11px] font-bold border border-amber-300">
+                <span className="hidden lg:inline-flex items-center px-2 py-0.5 rounded-md bg-amber-100 text-amber-900 font-mono text-[11px] font-bold border border-amber-300 whitespace-nowrap">
                   ₁₆S • SO₂ • H₂SO₄
                 </span>
-              </div>
-              <p className="text-[11px] text-slate-500 hidden md:block">
+              </span>
+              <span className="text-[11px] text-slate-500 hidden xl:block whitespace-nowrap">
                 Hệ thống Ôn tập &amp; Luyện thi Lý thuyết Hóa 11 (47 Câu Chuẩn)
-              </p>
-            </div>
-          </div>
+              </span>
+            </span>
+          </button>
 
           {/* Center Navigation Links (tablet & desktop; phones use the bottom tab bar) */}
-          <nav className="hidden md:flex items-center gap-1.5 bg-slate-100/90 p-1 rounded-2xl border border-slate-200/80">
-            <button
-              type="button"
-              onClick={() => setActiveNav("home")}
-              className={`inline-flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all active:scale-95 ${
-                activeNav === "home"
-                  ? "bg-white text-teal-800 shadow-xs"
-                  : "text-slate-600 hover:text-slate-900"
-              }`}
-            >
-              <LayoutGrid className="w-4 h-4" />
-              <span>Trang chủ</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setActiveNav("practice")}
-              className={`inline-flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all active:scale-95 ${
-                activeNav === "practice"
-                  ? "bg-white text-teal-800 shadow-xs"
-                  : "text-slate-600 hover:text-slate-900"
-              }`}
-            >
-              <ListChecks className="w-4 h-4" />
-              <span>Làm bài</span>
-              <span className="hidden md:inline-flex px-1.5 py-0.5 rounded-full bg-teal-100 text-teal-800 font-mono text-[11px]">
-                {activeQueue.length}
-              </span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setActiveNav("wrong_vault")}
-              className={`inline-flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all active:scale-95 ${
-                activeNav === "wrong_vault"
-                  ? "bg-white text-rose-700 shadow-xs"
-                  : "text-slate-600 hover:text-slate-900"
-              }`}
-            >
-              <Flame className="w-4 h-4 text-rose-600" />
-              <span>Câu sai</span>
-              {stats.wrong > 0 && (
-                <span className="px-1.5 py-0.5 rounded-full bg-rose-600 text-white font-mono text-[11px]">
-                  {stats.wrong}
-                </span>
-              )}
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setActiveNav("theory")}
-              className={`inline-flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all active:scale-95 ${
-                activeNav === "theory"
-                  ? "bg-white text-teal-800 shadow-xs"
-                  : "text-slate-600 hover:text-slate-900"
-              }`}
-            >
-              <BookOpen className="w-4 h-4" />
-              <span className="hidden sm:inline">Lý thuyết &amp; Flashcard</span>
-              <span className="sm:hidden">Lý thuyết</span>
-            </button>
+          <nav
+            ref={desktopNavRef}
+            aria-label="Điều hướng chính"
+            className="relative hidden md:flex items-center gap-1 lg:gap-1.5 bg-slate-100/90 p-1 rounded-2xl border border-slate-200/80"
+          >
+            <span
+              data-indicator
+              aria-hidden="true"
+              className="tab-indicator rounded-xl bg-white shadow-xs"
+            />
+            {NAV_TABS.map((tab) => {
+              const Icon = tab.icon;
+              const isActive = activeNav === tab.id;
+              const activeColor =
+                tab.id === "wrong_vault" ? "text-rose-700" : "text-teal-800";
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  data-active={isActive}
+                  aria-current={isActive ? "page" : undefined}
+                  onClick={() => navigateTo(tab.id)}
+                  className={`relative z-10 inline-flex items-center gap-1.5 px-2.5 lg:px-4 py-2 rounded-xl text-[13px] lg:text-sm font-bold whitespace-nowrap transition-[color,scale] duration-200 active:scale-95 ${
+                    isActive ? activeColor : "text-slate-600 hover:text-slate-900"
+                  }`}
+                >
+                  <Icon
+                    className={`w-4 h-4 shrink-0 ${
+                      tab.id === "wrong_vault" ? "text-rose-600" : ""
+                    }`}
+                  />
+                  <span>
+                    {tab.label}
+                    {tab.id === "theory" && (
+                      <span className="hidden xl:inline"> &amp; Flashcard</span>
+                    )}
+                  </span>
+                  {tab.id === "practice" && (
+                    <span className="hidden lg:inline-flex px-1.5 py-0.5 rounded-full bg-teal-100 text-teal-800 font-mono text-[11px]">
+                      {activeQueue.length}
+                    </span>
+                  )}
+                  {tab.id === "wrong_vault" && stats.wrong > 0 && (
+                    <span
+                      key={stats.wrong}
+                      className="px-1.5 py-0.5 rounded-full bg-rose-600 text-white font-mono text-[11px] animate-pop"
+                    >
+                      {stats.wrong}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
           </nav>
 
           {/* Right Mastery Status Pill (always visible, compact on phones) */}
           <div className="flex items-center gap-2 shrink-0">
-            <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-700">
+            <div
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-700 whitespace-nowrap"
+              title="Số câu đã thuộc"
+            >
               <Trophy className="w-4 h-4 text-amber-500" />
-              <span className="hidden sm:inline">Đã thuộc:</span>
+              <span className="hidden lg:inline">Đã thuộc:</span>
               <span className="font-mono font-bold text-teal-700">
-                {stats.mastered}/47
+                <AnimatedNumber value={stats.mastered} />
+                /47
               </span>
             </div>
           </div>
         </div>
+
+        {/* Thin session progress line — stays visible while the toolbar scrolls away */}
+        {activeNav === "practice" && (
+          <div
+            aria-hidden="true"
+            className="absolute inset-x-0 bottom-0 h-[3px] translate-y-full overflow-hidden"
+          >
+            <div
+              className="h-full w-full bg-gradient-to-r from-teal-500 to-emerald-400 transition-transform duration-700 ease-smooth"
+              style={{ transform: `translateX(-${100 - sessionPercent}%)` }}
+            />
+          </div>
+        )}
       </header>
 
       {/* ==================== MAIN CONTENT CONTAINER ==================== */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 lg:px-8 py-4 sm:py-8">
+      <main className="flex-1 max-w-7xl 2xl:max-w-[1440px] w-full mx-auto page-gutter py-4 sm:py-8 short:py-4">
         {/* ====================================================================
          * VIEW 1: TRANG CHỦ (HOME DASHBOARD & STUDY CONFIGURATOR)
          * ==================================================================== */}
         {activeNav === "home" && (
-          <div className="space-y-10 animate-fadeIn">
+          <div className="space-y-8 sm:space-y-10">
             {/* HERO BANNER */}
-            <section className="relative rounded-3xl bg-gradient-to-br from-slate-900 via-slate-800 to-teal-950 text-white p-6 sm:p-10 shadow-xl overflow-hidden border border-slate-700/80">
-              {/* Decorative Molecular Glow */}
-              <div className="absolute -top-24 -right-24 w-96 h-96 rounded-full bg-teal-500/15 blur-3xl pointer-events-none" />
-              <div className="absolute -bottom-24 -left-24 w-80 h-80 rounded-full bg-amber-400/10 blur-3xl pointer-events-none" />
+            <section className="relative rounded-3xl bg-gradient-to-br from-slate-900 via-slate-800 to-teal-950 text-white p-5 sm:p-10 short:p-6 shadow-xl overflow-hidden border border-slate-700/80 animate-rise">
+              {/* Decorative Molecular Glow (slow drifting orbs + atom orbits) */}
+              <div aria-hidden="true" className="absolute inset-0 pointer-events-none">
+                <div className="orb-a absolute -top-24 -right-24 w-96 h-96 rounded-full bg-teal-500/15 blur-3xl" />
+                <div className="orb-b absolute -bottom-24 -left-24 w-80 h-80 rounded-full bg-amber-400/10 blur-3xl" />
+                {/* Atom: each orbit is its own layer, so the rotation runs on
+                    the GPU compositor and costs the main thread nothing. */}
+                <div className="hidden sm:block absolute -top-10 -right-10 w-64 h-64 lg:w-72 lg:h-72 text-teal-300/25">
+                  {HERO_ORBITS.map((orbit) => (
+                    <svg
+                      key={orbit.tilt}
+                      viewBox="0 0 200 200"
+                      className={`absolute inset-0 w-full h-full ${orbit.spin}`}
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1"
+                    >
+                      <g transform={`rotate(${orbit.tilt} 100 100)`}>
+                        <ellipse cx="100" cy="100" rx="88" ry="34" />
+                        <circle cx="188" cy="100" r={orbit.r} fill={orbit.electron} stroke="none" />
+                      </g>
+                    </svg>
+                  ))}
+                  <svg viewBox="0 0 200 200" className="absolute inset-0 w-full h-full">
+                    <circle cx="100" cy="100" r="7" fill="currentColor" />
+                  </svg>
+                </div>
+              </div>
 
-              <div className="relative z-10 grid grid-cols-1 lg:grid-cols-12 gap-8 items-center">
-                <div className="lg:col-span-7 space-y-5">
-                  <div className="inline-flex flex-wrap items-center gap-2 px-3.5 py-1.5 rounded-full bg-white/10 backdrop-blur-md border border-white/15 text-xs font-semibold text-amber-300">
-                    <Sparkles className="w-3.5 h-3.5" />
+              <div className="relative z-10 grid grid-cols-1 lg:grid-cols-12 gap-6 sm:gap-8 items-center">
+                <div className="lg:col-span-7 space-y-4 sm:space-y-5 stagger">
+                  <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-2xl sm:rounded-full bg-white/10 border border-white/15 text-[11px] sm:text-xs font-semibold text-amber-300">
+                    <Sparkles className="w-3.5 h-3.5 shrink-0" />
                     <span>CHƯƠNG TRÌNH HÓA HỌC 11 MỚI • ĐẦY ĐỦ 47 CÂU HỎI &amp; HÌNH VẼ PHÒNG LAB</span>
                   </div>
 
-                  <h1 className="text-2xl sm:text-4xl lg:text-[40px] font-extrabold tracking-tight leading-tight">
+                  <h1 className="text-2xl sm:text-4xl lg:text-[40px] short:text-3xl font-extrabold tracking-tight leading-tight text-balance">
                     Chinh Phục Trọn Bộ Lý Thuyết{" "}
-                    <span className="text-transparent bg-clip-text bg-gradient-to-r from-amber-300 via-yellow-200 to-teal-300">
+                    <span className="text-transparent bg-clip-text bg-gradient-to-r from-amber-300 via-yellow-200 to-teal-300 text-gradient-pan">
                       Sulfur, SO₂ &amp; Sulfuric Acid
                     </span>
                   </h1>
@@ -1407,7 +1399,7 @@ export default function ChemistryStudyPlatform() {
                   </p>
 
                   {/* Quick Start Action Buttons */}
-                  <div className="flex flex-wrap items-center gap-3 pt-2">
+                  <div className="flex flex-wrap items-center gap-3 pt-1 sm:pt-2">
                     <button
                       type="button"
                       onClick={() =>
@@ -1421,7 +1413,7 @@ export default function ChemistryStudyPlatform() {
                           timeMinutes: 0,
                         })
                       }
-                      className="inline-flex items-center justify-center gap-2 w-full sm:w-auto px-5 py-3.5 min-h-[52px] rounded-2xl bg-teal-500 hover:bg-teal-400 active:scale-[0.98] text-slate-950 font-bold text-sm shadow-lg shadow-teal-500/25 transition-all cursor-pointer"
+                      className="btn-shine inline-flex items-center justify-center gap-2 w-full sm:w-auto px-5 py-3.5 min-h-[52px] rounded-2xl bg-teal-500 hover:bg-teal-400 hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98] text-slate-950 font-bold text-sm shadow-lg shadow-teal-500/25 hover:shadow-xl hover:shadow-teal-500/30 transition-[background-color,box-shadow,translate,scale] duration-200 cursor-pointer"
                     >
                       <Play className="w-4 h-4 fill-current" />
                       Ôn Tất Cả 47 Câu (1 → 47)
@@ -1440,7 +1432,7 @@ export default function ChemistryStudyPlatform() {
                           timeMinutes: 0,
                         })
                       }
-                      className="inline-flex items-center justify-center gap-2 w-full sm:w-auto px-5 py-3.5 min-h-[52px] rounded-2xl bg-amber-400 hover:bg-amber-300 active:scale-[0.98] text-slate-950 font-bold text-sm shadow-lg shadow-amber-400/20 transition-all cursor-pointer"
+                      className="btn-shine inline-flex items-center justify-center gap-2 w-full sm:w-auto px-5 py-3.5 min-h-[52px] rounded-2xl bg-amber-400 hover:bg-amber-300 hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98] text-slate-950 font-bold text-sm shadow-lg shadow-amber-400/20 hover:shadow-xl hover:shadow-amber-400/30 transition-[background-color,box-shadow,translate,scale] duration-200 cursor-pointer"
                     >
                       <Shuffle className="w-4 h-4" />
                       Ôn Xáo Trộn Ngẫu Nhiên
@@ -1459,7 +1451,7 @@ export default function ChemistryStudyPlatform() {
                           timeMinutes: 45,
                         })
                       }
-                      className="inline-flex items-center justify-center gap-2 w-full sm:w-auto px-5 py-3.5 min-h-[52px] rounded-2xl bg-white/10 hover:bg-white/20 active:scale-[0.98] text-white border border-white/20 font-semibold text-sm transition-all cursor-pointer"
+                      className="inline-flex items-center justify-center gap-2 w-full sm:w-auto px-5 py-3.5 min-h-[52px] rounded-2xl bg-white/10 hover:bg-white/20 hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98] text-white border border-white/20 font-semibold text-sm transition-[background-color,translate,scale] duration-200 cursor-pointer"
                     >
                       <Clock className="w-4 h-4 text-amber-300" />
                       Thi Thử 45 Phút
@@ -1468,37 +1460,40 @@ export default function ChemistryStudyPlatform() {
                 </div>
 
                 {/* Right Column: Live Mastery & Quick Stats */}
-                <div className="lg:col-span-5 grid grid-cols-2 gap-3.5">
-                  <div className="p-4 rounded-2xl bg-white/10 backdrop-blur-md border border-white/15 flex flex-col justify-between">
-                    <div className="flex items-center justify-between">
+                <div className="lg:col-span-5 grid grid-cols-2 gap-3 sm:gap-3.5 stagger">
+                  <div className="p-4 rounded-2xl bg-white/10 border border-white/15 flex flex-col justify-between">
+                    <div className="flex items-center justify-between gap-2">
                       <span className="text-xs text-slate-300 font-medium">Đã Thành Thạo</span>
-                      <CheckCircle2 className="w-5 h-5 text-emerald-400" />
+                      <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
                     </div>
                     <div className="mt-3">
                       <div className="text-3xl font-mono font-extrabold text-white">
-                        {stats.mastered}
+                        <AnimatedNumber value={stats.mastered} />
                         <span className="text-base font-normal text-slate-400">/47</span>
                       </div>
-                      <div className="w-full h-2 rounded-full bg-white/10 mt-2 overflow-hidden">
-                        <div
-                          className="h-full bg-emerald-400 rounded-full transition-all duration-500"
-                          style={{ width: `${stats.masteryPercent}%` }}
+                      <div className="mt-2">
+                        <ProgressBar
+                          percent={stats.masteryPercent}
+                          trackClassName="bg-white/10"
+                          barClassName="bg-emerald-400"
+                          label="Tỉ lệ câu đã thành thạo"
                         />
                       </div>
                     </div>
                   </div>
 
-                  <div
-                    onClick={() => setActiveNav("wrong_vault")}
-                    className="p-4 rounded-2xl bg-rose-500/20 hover:bg-rose-500/30 backdrop-blur-md border border-rose-400/30 flex flex-col justify-between cursor-pointer transition-all"
+                  <button
+                    type="button"
+                    onClick={() => navigateTo("wrong_vault")}
+                    className="p-4 rounded-2xl bg-rose-500/20 hover:bg-rose-500/30 hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98] border border-rose-400/30 flex flex-col justify-between text-left cursor-pointer transition-[background-color,translate,scale] duration-200"
                   >
-                    <div className="flex items-center justify-between">
+                    <div className="flex items-center justify-between gap-2 w-full">
                       <span className="text-xs text-rose-200 font-medium">Kho Câu Sai</span>
-                      <Flame className="w-5 h-5 text-rose-400" />
+                      <Flame className="w-5 h-5 text-rose-400 shrink-0" />
                     </div>
                     <div className="mt-3">
                       <div className="text-3xl font-mono font-extrabold text-rose-300">
-                        {stats.wrong}
+                        <AnimatedNumber value={stats.wrong} />
                         <span className="text-xs font-sans font-normal text-rose-200 ml-1.5">
                           câu cần sửa
                         </span>
@@ -1507,16 +1502,16 @@ export default function ChemistryStudyPlatform() {
                         Nhấn để ôn tập câu sai →
                       </p>
                     </div>
-                  </div>
+                  </button>
 
-                  <div className="p-4 rounded-2xl bg-white/10 backdrop-blur-md border border-white/15 flex flex-col justify-between">
-                    <div className="flex items-center justify-between">
+                  <div className="p-4 rounded-2xl bg-white/10 border border-white/15 flex flex-col justify-between">
+                    <div className="flex items-center justify-between gap-2">
                       <span className="text-xs text-slate-300 font-medium">Câu Đánh Dấu Sao</span>
-                      <Star className="w-5 h-5 text-amber-300 fill-amber-300" />
+                      <Star className="w-5 h-5 text-amber-300 fill-amber-300 shrink-0" />
                     </div>
                     <div className="mt-3">
                       <div className="text-2xl font-mono font-bold text-amber-300">
-                        {stats.bookmarked} câu
+                        <AnimatedNumber value={stats.bookmarked} /> câu
                       </div>
                       <p className="text-[11px] text-slate-300 mt-1">
                         Lưu các câu bẫy lý thuyết
@@ -1524,14 +1519,14 @@ export default function ChemistryStudyPlatform() {
                     </div>
                   </div>
 
-                  <div className="p-4 rounded-2xl bg-white/10 backdrop-blur-md border border-white/15 flex flex-col justify-between">
-                    <div className="flex items-center justify-between">
+                  <div className="p-4 rounded-2xl bg-white/10 border border-white/15 flex flex-col justify-between">
+                    <div className="flex items-center justify-between gap-2">
                       <span className="text-xs text-slate-300 font-medium">Chưa Làm</span>
-                      <Target className="w-5 h-5 text-sky-300" />
+                      <Target className="w-5 h-5 text-sky-300 shrink-0" />
                     </div>
                     <div className="mt-3">
                       <div className="text-2xl font-mono font-bold text-sky-300">
-                        {stats.unseen} câu
+                        <AnimatedNumber value={stats.unseen} /> câu
                       </div>
                       <p className="text-[11px] text-slate-300 mt-1">
                         {loadingDb ? "Đang đồng bộ..." : "Đã lưu tiến độ tự động"}
@@ -1543,471 +1538,524 @@ export default function ChemistryStudyPlatform() {
             </section>
 
             {/* ==================== SECTION 1: ÔN TẬP TỪNG PHẦN (4 CHUYÊN ĐỀ) ==================== */}
-            <section className="space-y-4">
-              <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-2">
-                <div>
-                  <span className="text-xs font-mono font-bold uppercase tracking-wider text-teal-700">
-                    PHÂN CHIA THEO CHUYÊN ĐỀ SÁCH GIÁO KHOA
-                  </span>
-                  <h2 className="text-xl sm:text-2xl font-extrabold text-slate-900">
-                    Ôn Tập Từng Phần (4 Chuyên Đề Trọng Tâm)
-                  </h2>
-                </div>
-                <p className="text-xs sm:text-sm text-slate-600">
-                  Chọn học tuần tự hoặc xáo trộn ngẫu nhiên từng phần để nắm chắc kiến thức.
-                </p>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-                {TOPICS_META.map((topic) => {
-                  const topicQuestions = CHEMISTRY_QUESTIONS.filter(
-                    (q) => q.topic === topic.id
-                  );
-                  const masteredInTopic = topicQuestions.filter(
-                    (q) => progressMap[q.id]?.status === "mastered"
-                  ).length;
-                  const wrongInTopic = topicQuestions.filter(
-                    (q) => progressMap[q.id]?.status === "wrong"
-                  ).length;
-                  const percent = Math.round(
-                    (masteredInTopic / topicQuestions.length) * 100
-                  );
-
-                  const badgeColors: Record<string, string> = {
-                    amber: "bg-amber-100 text-amber-900 border-amber-300",
-                    sky: "bg-sky-100 text-sky-900 border-sky-300",
-                    teal: "bg-teal-100 text-teal-900 border-teal-300",
-                    violet: "bg-violet-100 text-violet-900 border-violet-300",
-                  };
-
-                  return (
-                    <div
-                      key={topic.id}
-                      className="bg-white rounded-3xl border border-slate-200/90 p-6 shadow-xs hover:shadow-md transition-all flex flex-col justify-between"
-                    >
-                      <div className="space-y-3">
-                        <div className="flex items-center justify-between gap-2">
-                          <span
-                            className={`px-3 py-1 rounded-xl font-mono text-xs font-bold border ${
-                              badgeColors[topic.accentColor]
-                            }`}
-                          >
-                            {topic.formulaBadge}
-                          </span>
-                          <span className="font-mono text-xs font-semibold text-slate-500">
-                            {topic.questionRange} ({topic.count} câu)
-                          </span>
-                        </div>
-
-                        <h3 className="text-lg sm:text-xl font-bold text-slate-900">
-                          {topic.title}
-                        </h3>
-                        <p className="text-xs sm:text-sm text-slate-600 leading-relaxed">
-                          {topic.description}
-                        </p>
-                      </div>
-
-                      <div className="mt-5 pt-4 border-t border-slate-100 space-y-4">
-                        {/* Topic Mastery Progress Bar */}
-                        <div className="space-y-1.5">
-                          <div className="flex items-center justify-between text-xs">
-                            <span className="font-semibold text-slate-700">
-                              Tiến độ thuộc:{" "}
-                              <strong className="text-teal-700">
-                                {masteredInTopic}/{topic.count} câu ({percent}%)
-                              </strong>
-                            </span>
-                            {wrongInTopic > 0 && (
-                              <span className="text-rose-600 font-semibold">
-                                {wrongInTopic} câu đang sai
-                              </span>
-                            )}
-                          </div>
-                          <div className="w-full h-2 rounded-full bg-slate-100 overflow-hidden">
-                            <div
-                              className="h-full bg-teal-600 rounded-full transition-all duration-500"
-                              style={{ width: `${percent}%` }}
-                            />
-                          </div>
-                        </div>
-
-                        {/* Action Buttons */}
-                        <div className="grid grid-cols-2 gap-2.5">
-                          <button
-                            type="button"
-                            onClick={() =>
-                              startSession({
-                                questions: topicQuestions,
-                                title: `Chuyên đề: ${topic.title}`,
-                                modeTag: `topic_${topic.id}`,
-                                shuffleQ: false,
-                                shuffleOpt: false,
-                                mode: "instant",
-                              })
-                            }
-                            className="inline-flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl bg-teal-700 hover:bg-teal-800 text-white font-bold text-xs sm:text-sm transition-colors cursor-pointer"
-                          >
-                            <Play className="w-3.5 h-3.5 fill-current" />
-                            Ôn phần này
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              startSession({
-                                questions: topicQuestions,
-                                title: `Xáo trộn: ${topic.title}`,
-                                modeTag: `topic_${topic.id}_shuffled`,
-                                shuffleQ: true,
-                                shuffleOpt: true,
-                                mode: "instant",
-                              })
-                            }
-                            className="inline-flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 font-semibold text-xs sm:text-sm transition-colors cursor-pointer"
-                          >
-                            <Shuffle className="w-3.5 h-3.5" />
-                            Xáo trộn phần này
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </section>
-
-            {/* ==================== SECTION 2: BỘ TÙY CHỈNH CHẾ ĐỘ ÔN LUYỆN ĐA NĂNG ==================== */}
-            <section className="bg-white rounded-3xl border border-slate-200/90 p-6 sm:p-8 shadow-xs space-y-6">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-4">
-                <div className="flex items-center gap-3">
-                  <div className="w-11 h-11 rounded-2xl bg-teal-50 border border-teal-200 flex items-center justify-center text-teal-700">
-                    <SlidersHorizontal className="w-5 h-5" />
-                  </div>
+            <Reveal id="home-topics">
+              <section className="space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-2">
                   <div>
-                    <h2 className="text-lg sm:text-xl font-extrabold text-slate-900">
-                      Tạo Đề Ôn Luyện Tùy Chỉnh (Custom Study Builder)
+                    <span className="text-xs font-mono font-bold uppercase tracking-wider text-teal-700">
+                      PHÂN CHIA THEO CHUYÊN ĐỀ SÁCH GIÁO KHOA
+                    </span>
+                    <h2 className="text-xl sm:text-2xl font-extrabold text-slate-900">
+                      Ôn Tập Từng Phần (4 Chuyên Đề Trọng Tâm)
                     </h2>
-                    <p className="text-xs sm:text-sm text-slate-600">
-                      Kết hợp nhiều phần, lọc câu sai/chưa làm, bật xáo trộn câu hỏi &amp; đáp án theo ý muốn.
-                    </p>
                   </div>
-                </div>
-                <span className="px-3.5 py-1.5 rounded-xl bg-teal-50 text-teal-900 font-mono text-xs font-bold border border-teal-200 self-start sm:self-center">
-                  Số câu thỏa mãn: {customFilteredQuestions.length} câu
-                </span>
-              </div>
-
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                {/* Step 1: Select Topics */}
-                <div className="space-y-3">
-                  <label className="block text-xs font-bold uppercase tracking-wider text-slate-500">
-                    1. Chọn các phần muốn gộp:
-                  </label>
-                  <div className="space-y-2">
-                    {TOPICS_META.map((t) => {
-                      const checked = selectedTopics.includes(t.id);
-                      return (
-                        <button
-                          key={t.id}
-                          type="button"
-                          onClick={() => {
-                            setSelectedTopics((prev) =>
-                              prev.includes(t.id)
-                                ? prev.length > 1
-                                  ? prev.filter((x) => x !== t.id)
-                                  : prev
-                                : [...prev, t.id]
-                            );
-                          }}
-                          className={`w-full flex items-center justify-between p-3 rounded-xl border text-left text-xs sm:text-sm font-semibold transition-all ${
-                            checked
-                              ? "bg-teal-50/80 border-teal-600 text-teal-950"
-                              : "bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100"
-                          }`}
-                        >
-                          <span>{t.title}</span>
-                          <span className="font-mono text-xs px-2 py-0.5 rounded bg-white border border-slate-200">
-                            {t.count} câu
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                {/* Step 2: Filter Status & Feedback Mode */}
-                <div className="space-y-4">
-                  <div className="space-y-2">
-                    <label className="block text-xs font-bold uppercase tracking-wider text-slate-500">
-                      2. Lọc đối tượng câu hỏi:
-                    </label>
-                    <div className="grid grid-cols-2 gap-2">
-                      {[
-                        { id: "all", label: "Tất cả câu" },
-                        { id: "wrong", label: `Câu làm sai (${stats.wrong})` },
-                        { id: "unseen", label: `Chưa làm (${stats.unseen})` },
-                        { id: "bookmarked", label: `Gắn sao (${stats.bookmarked})` },
-                      ].map((st) => (
-                        <button
-                          key={st.id}
-                          type="button"
-                          onClick={() =>
-                            setStatusFilter(
-                              st.id as "all" | "wrong" | "unseen" | "bookmarked"
-                            )
-                          }
-                          className={`py-2.5 px-3 rounded-xl border text-xs font-bold transition-all ${
-                            statusFilter === st.id
-                              ? "bg-slate-900 text-white border-slate-900"
-                              : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50"
-                          }`}
-                        >
-                          {st.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div className="space-y-2">
-                    <label className="block text-xs font-bold uppercase tracking-wider text-slate-500">
-                      3. Chế độ chấm &amp; giải thích:
-                    </label>
-                    <div className="grid grid-cols-2 gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setFeedbackMode("instant")}
-                        className={`p-3 rounded-xl border text-left transition-all ${
-                          feedbackMode === "instant"
-                            ? "bg-teal-50 border-teal-600 text-teal-950"
-                            : "bg-white border-slate-200 text-slate-600"
-                        }`}
-                      >
-                        <div className="text-xs font-bold">Chế độ Ôn Học</div>
-                        <div className="text-[11px] opacity-80 mt-0.5">
-                          Chấm &amp; hiện lời giải ngay sau mỗi câu
-                        </div>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setFeedbackMode("exam")}
-                        className={`p-3 rounded-xl border text-left transition-all ${
-                          feedbackMode === "exam"
-                            ? "bg-teal-50 border-teal-600 text-teal-950"
-                            : "bg-white border-slate-200 text-slate-600"
-                        }`}
-                      >
-                        <div className="text-xs font-bold">Chế độ Phòng Thi</div>
-                        <div className="text-[11px] opacity-80 mt-0.5">
-                          Làm hết đề rồi nộp bài chấm điểm
-                        </div>
-                      </button>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Step 3: Shuffle Options, Timer & Launch */}
-                <div className="space-y-4 flex flex-col justify-between">
-                  <div className="space-y-3">
-                    <label className="block text-xs font-bold uppercase tracking-wider text-slate-500">
-                      4. Tùy chọn Xáo trộn &amp; Thời gian:
-                    </label>
-
-                    <label className="flex items-center justify-between p-3 rounded-xl bg-slate-50 border border-slate-200 cursor-pointer">
-                      <span className="text-xs sm:text-sm font-semibold text-slate-800">
-                        Xáo trộn thứ tự các câu hỏi
-                      </span>
-                      <input
-                        type="checkbox"
-                        checked={shuffleQuestions}
-                        onChange={(e) => setShuffleQuestions(e.target.checked)}
-                        className="w-4 h-4 accent-teal-700 rounded"
-                      />
-                    </label>
-
-                    <label className="flex items-center justify-between p-3 rounded-xl bg-slate-50 border border-slate-200 cursor-pointer">
-                      <span className="text-xs sm:text-sm font-semibold text-slate-800">
-                        Xáo trộn vị trí đáp án A, B, C, D
-                      </span>
-                      <input
-                        type="checkbox"
-                        checked={shuffleOptions}
-                        onChange={(e) => setShuffleOptions(e.target.checked)}
-                        className="w-4 h-4 accent-teal-700 rounded"
-                      />
-                    </label>
-
-                    <div className="flex items-center gap-2 pt-1">
-                      <span className="text-xs font-semibold text-slate-600 shrink-0">
-                        Thời gian:
-                      </span>
-                      {[0, 15, 30, 45].map((mins) => (
-                        <button
-                          key={mins}
-                          type="button"
-                          onClick={() => setTimeLimitMinutes(mins)}
-                          className={`flex-1 py-1.5 rounded-lg font-mono text-xs font-bold border ${
-                            timeLimitMinutes === mins
-                              ? "bg-slate-900 text-white border-slate-900"
-                              : "bg-white text-slate-700 border-slate-200"
-                          }`}
-                        >
-                          {mins === 0 ? "Tự do" : `${mins}p`}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  <button
-                    type="button"
-                    disabled={customFilteredQuestions.length === 0}
-                    onClick={() =>
-                      startSession({
-                        questions: customFilteredQuestions,
-                        title: `Đề tùy chỉnh (${customFilteredQuestions.length} câu)`,
-                        modeTag: "custom",
-                        shuffleQ: shuffleQuestions,
-                        shuffleOpt: shuffleOptions,
-                        mode: feedbackMode,
-                        timeMinutes: timeLimitMinutes,
-                      })
-                    }
-                    className="w-full py-3.5 px-5 min-h-[52px] rounded-2xl bg-gradient-to-r from-teal-700 to-teal-600 hover:from-teal-800 hover:to-teal-700 active:scale-[0.99] disabled:opacity-50 text-white font-bold text-sm shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer"
-                  >
-                    <Play className="w-4 h-4 fill-current" />
-                    Bắt Đầu Luyện Tập ({customFilteredQuestions.length} câu)
-                  </button>
-                </div>
-              </div>
-            </section>
-
-            {/* ==================== SECTION 3: TRA CỨU NHANH TOÀN BỘ 47 CÂU HỎI ==================== */}
-            <section className="bg-white rounded-3xl border border-slate-200/90 p-6 sm:p-8 shadow-xs space-y-5">
-              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-                <div>
-                  <h2 className="text-lg sm:text-xl font-extrabold text-slate-900">
-                    Ngân Hàng 47 Câu Hỏi Trong Đề Cương (Tra Cứu &amp; Chọn Câu Nhanh)
-                  </h2>
                   <p className="text-xs sm:text-sm text-slate-600">
-                    Tìm kiếm nhanh theo từ khóa (ví dụ: <em>pyrite, thạch cao, P₂O₅, oleum, đường mía</em>) hoặc nhấn vào câu bất kì để luyện ngay.
+                    Chọn học tuần tự hoặc xáo trộn ngẫu nhiên từng phần để nắm chắc kiến thức.
                   </p>
                 </div>
 
-                {/* Search Input */}
-                <div className="relative w-full md:w-80">
-                  <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-                  <input
-                    type="text"
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="Tìm câu hỏi, công thức hóa học..."
-                    className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-slate-200 bg-slate-50 text-sm focus:bg-white focus:outline-none focus:ring-2 focus:ring-teal-600"
-                  />
-                </div>
-              </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-5">
+                  {TOPICS_META.map((topic) => {
+                    const topicQuestions = CHEMISTRY_QUESTIONS.filter(
+                      (q) => q.topic === topic.id
+                    );
+                    const masteredInTopic = topicQuestions.filter(
+                      (q) => progressMap[q.id]?.status === "mastered"
+                    ).length;
+                    const wrongInTopic = topicQuestions.filter(
+                      (q) => progressMap[q.id]?.status === "wrong"
+                    ).length;
+                    const percent = Math.round(
+                      (masteredInTopic / topicQuestions.length) * 100
+                    );
 
-              {/* Filter Tabs */}
-              <div className="flex flex-wrap gap-2">
-                {[
-                  { id: "all", label: "Tất cả (47)" },
-                  { id: "sulfur", label: "Sulfur (Câu 1–12)" },
-                  { id: "so2", label: "Sulfur dioxide (Câu 13–24)" },
-                  { id: "h2so4", label: "Sulfuric acid - Sulfate (Câu 25–40)" },
-                  { id: "true_false", label: "Đúng / Sai (Câu 41–47)" },
-                ].map((tab) => (
-                  <button
-                    key={tab.id}
-                    type="button"
-                    onClick={() => setExplorerTopic(tab.id as TopicId | "all")}
-                    className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all ${
-                      explorerTopic === tab.id
-                        ? "bg-teal-700 text-white"
-                        : "bg-slate-100 text-slate-600 hover:bg-slate-200"
-                    }`}
-                  >
-                    {tab.label}
-                  </button>
-                ))}
-              </div>
+                    const badgeColors: Record<string, string> = {
+                      amber: "bg-amber-100 text-amber-900 border-amber-300",
+                      sky: "bg-sky-100 text-sky-900 border-sky-300",
+                      teal: "bg-teal-100 text-teal-900 border-teal-300",
+                      violet: "bg-violet-100 text-violet-900 border-violet-300",
+                    };
 
-              {/* Compact Grid of Questions */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-h-[60vh] md:max-h-[420px] overflow-y-auto pr-1">
-                {explorerQuestions.map((q) => {
-                  const p = progressMap[q.id];
-                  return (
-                    <div
-                      key={q.id}
-                      onClick={() => {
-                        const idx = CHEMISTRY_QUESTIONS.findIndex(
-                          (x) => x.id === q.id
-                        );
-                        startSession({
-                          questions: CHEMISTRY_QUESTIONS,
-                          title: `Ôn tập: ${q.code} — ${q.topicLabel}`,
-                          modeTag: "explorer",
-                          shuffleQ: false,
-                          shuffleOpt: false,
-                          mode: "instant",
-                          timeMinutes: 0,
-                          layout: "single",
-                          startIndex: idx >= 0 ? idx : 0,
-                        });
-                      }}
-                      className="p-3.5 rounded-2xl border border-slate-200 hover:border-teal-500 hover:bg-teal-50/30 transition-all cursor-pointer flex items-start justify-between gap-3"
-                    >
-                      <div className="space-y-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className="font-mono text-xs font-bold px-2 py-0.5 rounded bg-slate-900 text-white">
-                            {q.code}
-                          </span>
-                          <span className="font-mono text-[11px] font-semibold text-teal-800 bg-teal-50 px-2 py-0.5 rounded border border-teal-200">
-                            {q.keyFormula}
-                          </span>
-                          {q.illustrationId && (
-                            <span className="text-[11px] font-semibold text-amber-800 bg-amber-100 px-2 py-0.5 rounded">
-                              Có hình vẽ
+                    return (
+                      <div
+                        key={topic.id}
+                        className="group bg-white rounded-3xl border border-slate-200/90 p-5 sm:p-6 shadow-xs hover:shadow-lg hover:-translate-y-1 hover:border-teal-300 transition-[box-shadow,translate,border-color] duration-300 ease-smooth flex flex-col justify-between"
+                      >
+                        <div className="space-y-3">
+                          <div className="flex items-center justify-between gap-2">
+                            <span
+                              className={`px-3 py-1 rounded-xl font-mono text-xs font-bold border ${
+                                badgeColors[topic.accentColor]
+                              }`}
+                            >
+                              {topic.formulaBadge}
                             </span>
-                          )}
-                        </div>
-                        <p className="text-xs sm:text-sm text-slate-700 line-clamp-2">
-                          {q.stem}
-                        </p>
-                      </div>
+                            <span className="font-mono text-xs font-semibold text-slate-500">
+                              {topic.questionRange} ({topic.count} câu)
+                            </span>
+                          </div>
 
-                      <div className="shrink-0">
-                        {p?.status === "mastered" ? (
-                          <CheckCircle2 className="w-5 h-5 text-emerald-600" />
-                        ) : p?.status === "wrong" ? (
-                          <XCircle className="w-5 h-5 text-rose-600" />
-                        ) : (
-                          <ChevronRight className="w-5 h-5 text-slate-400" />
-                        )}
+                          <h3 className="text-lg sm:text-xl font-bold text-slate-900">
+                            {topic.title}
+                          </h3>
+                          <p className="text-xs sm:text-sm text-slate-600 leading-relaxed">
+                            {topic.description}
+                          </p>
+                        </div>
+
+                        <div className="mt-5 pt-4 border-t border-slate-100 space-y-4">
+                          {/* Topic Mastery Progress Bar */}
+                          <div className="space-y-1.5">
+                            <div className="flex items-center justify-between text-xs">
+                              <span className="font-semibold text-slate-700">
+                                Tiến độ thuộc:{" "}
+                                <strong className="text-teal-700">
+                                  {masteredInTopic}/{topic.count} câu ({percent}%)
+                                </strong>
+                              </span>
+                              {wrongInTopic > 0 && (
+                                <span className="text-rose-600 font-semibold">
+                                  {wrongInTopic} câu đang sai
+                                </span>
+                              )}
+                            </div>
+                            <ProgressBar
+                              percent={percent}
+                              barClassName="bg-gradient-to-r from-teal-600 to-emerald-500"
+                              label={`Tiến độ thuộc ${topic.title}`}
+                            />
+                          </div>
+
+                          {/* Action Buttons */}
+                          <div className="grid grid-cols-2 gap-2.5">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                startSession({
+                                  questions: topicQuestions,
+                                  title: `Chuyên đề: ${topic.title}`,
+                                  modeTag: `topic_${topic.id}`,
+                                  shuffleQ: false,
+                                  shuffleOpt: false,
+                                  mode: "instant",
+                                })
+                              }
+                              className="inline-flex items-center justify-center gap-1.5 py-2.5 px-3 min-h-[44px] rounded-xl bg-teal-700 hover:bg-teal-800 active:scale-[0.97] text-white font-bold text-xs sm:text-sm transition-[background-color,scale] duration-150 cursor-pointer"
+                            >
+                              <Play className="w-3.5 h-3.5 fill-current" />
+                              Ôn phần này
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                startSession({
+                                  questions: topicQuestions,
+                                  title: `Xáo trộn: ${topic.title}`,
+                                  modeTag: `topic_${topic.id}_shuffled`,
+                                  shuffleQ: true,
+                                  shuffleOpt: true,
+                                  mode: "instant",
+                                })
+                              }
+                              className="inline-flex items-center justify-center gap-1.5 py-2.5 px-3 min-h-[44px] rounded-xl bg-slate-100 hover:bg-slate-200 active:scale-[0.97] text-slate-800 font-semibold text-xs sm:text-sm transition-[background-color,scale] duration-150 cursor-pointer"
+                            >
+                              <Shuffle className="w-3.5 h-3.5" />
+                              Xáo trộn phần này
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </section>
+            </Reveal>
+
+            {/* ==================== SECTION 2: BỘ TÙY CHỈNH CHẾ ĐỘ ÔN LUYỆN ĐA NĂNG ==================== */}
+            <Reveal id="home-builder">
+              <section className="bg-white rounded-3xl border border-slate-200/90 p-4 sm:p-8 shadow-xs space-y-6">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-4">
+                  <div className="flex items-center gap-3">
+                    <div className="w-11 h-11 rounded-2xl bg-teal-50 border border-teal-200 flex items-center justify-center text-teal-700">
+                      <SlidersHorizontal className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h2 className="text-lg sm:text-xl font-extrabold text-slate-900">
+                        Tạo Đề Ôn Luyện Tùy Chỉnh (Custom Study Builder)
+                      </h2>
+                      <p className="text-xs sm:text-sm text-slate-600">
+                        Kết hợp nhiều phần, lọc câu sai/chưa làm, bật xáo trộn câu hỏi &amp; đáp án theo ý muốn.
+                      </p>
+                    </div>
+                  </div>
+                  <span className="px-3.5 py-1.5 rounded-xl bg-teal-50 text-teal-900 font-mono text-xs font-bold border border-teal-200 self-start sm:self-center">
+                    Số câu thỏa mãn: {customFilteredQuestions.length} câu
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                  {/* Step 1: Select Topics */}
+                  <div className="space-y-3">
+                    <label className="block text-xs font-bold uppercase tracking-wider text-slate-500">
+                      1. Chọn các phần muốn gộp:
+                    </label>
+                    <div className="space-y-2">
+                      {TOPICS_META.map((t) => {
+                        const checked = selectedTopics.includes(t.id);
+                        return (
+                          <button
+                            key={t.id}
+                            type="button"
+                            onClick={() => {
+                              setSelectedTopics((prev) =>
+                                prev.includes(t.id)
+                                  ? prev.length > 1
+                                    ? prev.filter((x) => x !== t.id)
+                                    : prev
+                                  : [...prev, t.id]
+                              );
+                            }}
+                            aria-pressed={checked}
+                            className={`w-full flex items-center justify-between gap-2 p-3 min-h-[44px] rounded-xl border text-left text-xs sm:text-sm font-semibold transition-[background-color,border-color,color,scale] duration-150 active:scale-[0.98] ${
+                              checked
+                                ? "bg-teal-50/80 border-teal-600 text-teal-950"
+                                : "bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100"
+                            }`}
+                          >
+                            <span>{t.title}</span>
+                            <span className="font-mono text-xs px-2 py-0.5 rounded bg-white border border-slate-200">
+                              {t.count} câu
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Step 2: Filter Status & Feedback Mode */}
+                  <div className="space-y-4">
+                    <div className="space-y-2">
+                      <label className="block text-xs font-bold uppercase tracking-wider text-slate-500">
+                        2. Lọc đối tượng câu hỏi:
+                      </label>
+                      <div className="grid grid-cols-2 gap-2">
+                        {[
+                          { id: "all", label: "Tất cả câu" },
+                          { id: "wrong", label: `Câu làm sai (${stats.wrong})` },
+                          { id: "unseen", label: `Chưa làm (${stats.unseen})` },
+                          { id: "bookmarked", label: `Gắn sao (${stats.bookmarked})` },
+                        ].map((st) => (
+                          <button
+                            key={st.id}
+                            type="button"
+                            onClick={() =>
+                              setStatusFilter(
+                                st.id as "all" | "wrong" | "unseen" | "bookmarked"
+                              )
+                            }
+                            aria-pressed={statusFilter === st.id}
+                            className={`py-2.5 px-3 min-h-[44px] rounded-xl border text-xs font-bold transition-[background-color,border-color,color,scale] duration-150 active:scale-[0.97] ${
+                              statusFilter === st.id
+                                ? "bg-slate-900 text-white border-slate-900"
+                                : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50"
+                            }`}
+                          >
+                            {st.label}
+                          </button>
+                        ))}
                       </div>
                     </div>
-                  );
-                })}
-              </div>
-            </section>
+
+                    <div className="space-y-2">
+                      <label className="block text-xs font-bold uppercase tracking-wider text-slate-500">
+                        3. Chế độ chấm &amp; giải thích:
+                      </label>
+                      <div className="grid grid-cols-2 gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setFeedbackMode("instant")}
+                          aria-pressed={feedbackMode === "instant"}
+                          className={`p-3 rounded-xl border text-left transition-[background-color,border-color,color,scale] duration-150 active:scale-[0.98] ${
+                            feedbackMode === "instant"
+                              ? "bg-teal-50 border-teal-600 text-teal-950"
+                              : "bg-white border-slate-200 text-slate-600"
+                          }`}
+                        >
+                          <div className="text-xs font-bold">Chế độ Ôn Học</div>
+                          <div className="text-[11px] opacity-80 mt-0.5">
+                            Chấm &amp; hiện lời giải ngay sau mỗi câu
+                          </div>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setFeedbackMode("exam")}
+                          aria-pressed={feedbackMode === "exam"}
+                          className={`p-3 rounded-xl border text-left transition-[background-color,border-color,color,scale] duration-150 active:scale-[0.98] ${
+                            feedbackMode === "exam"
+                              ? "bg-teal-50 border-teal-600 text-teal-950"
+                              : "bg-white border-slate-200 text-slate-600"
+                          }`}
+                        >
+                          <div className="text-xs font-bold">Chế độ Phòng Thi</div>
+                          <div className="text-[11px] opacity-80 mt-0.5">
+                            Làm hết đề rồi nộp bài chấm điểm
+                          </div>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Step 3: Shuffle Options, Timer & Launch */}
+                  <div className="space-y-4 flex flex-col justify-between">
+                    <div className="space-y-3">
+                      <label className="block text-xs font-bold uppercase tracking-wider text-slate-500">
+                        4. Tùy chọn Xáo trộn &amp; Thời gian:
+                      </label>
+
+                      <label className="flex items-center justify-between gap-3 p-3 min-h-[44px] rounded-xl bg-slate-50 border border-slate-200 cursor-pointer">
+                        <span className="text-xs sm:text-sm font-semibold text-slate-800">
+                          Xáo trộn thứ tự các câu hỏi
+                        </span>
+                        <input
+                          type="checkbox"
+                          checked={shuffleQuestions}
+                          onChange={(e) => setShuffleQuestions(e.target.checked)}
+                          className="w-5 h-5 accent-teal-700 rounded shrink-0"
+                        />
+                      </label>
+
+                      <label className="flex items-center justify-between gap-3 p-3 min-h-[44px] rounded-xl bg-slate-50 border border-slate-200 cursor-pointer">
+                        <span className="text-xs sm:text-sm font-semibold text-slate-800">
+                          Xáo trộn vị trí đáp án A, B, C, D
+                        </span>
+                        <input
+                          type="checkbox"
+                          checked={shuffleOptions}
+                          onChange={(e) => setShuffleOptions(e.target.checked)}
+                          className="w-5 h-5 accent-teal-700 rounded shrink-0"
+                        />
+                      </label>
+
+                      <div className="flex items-center gap-2 pt-1">
+                        <span className="text-xs font-semibold text-slate-600 shrink-0">
+                          Thời gian:
+                        </span>
+                        {[0, 15, 30, 45].map((mins) => (
+                          <button
+                            key={mins}
+                            type="button"
+                            onClick={() => setTimeLimitMinutes(mins)}
+                            aria-pressed={timeLimitMinutes === mins}
+                            className={`flex-1 py-1.5 min-h-[40px] rounded-lg font-mono text-xs font-bold border transition-[background-color,border-color,color,scale] duration-150 active:scale-95 ${
+                              timeLimitMinutes === mins
+                                ? "bg-slate-900 text-white border-slate-900"
+                                : "bg-white text-slate-700 border-slate-200"
+                            }`}
+                          >
+                            {mins === 0 ? "Tự do" : `${mins}p`}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      disabled={customFilteredQuestions.length === 0}
+                      onClick={() =>
+                        startSession({
+                          questions: customFilteredQuestions,
+                          title: `Đề tùy chỉnh (${customFilteredQuestions.length} câu)`,
+                          modeTag: "custom",
+                          shuffleQ: shuffleQuestions,
+                          shuffleOpt: shuffleOptions,
+                          mode: feedbackMode,
+                          timeMinutes: timeLimitMinutes,
+                        })
+                      }
+                      className="btn-shine w-full py-3.5 px-5 min-h-[52px] rounded-2xl bg-gradient-to-r from-teal-700 to-teal-600 hover:from-teal-800 hover:to-teal-700 hover:shadow-lg active:scale-[0.99] disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold text-sm shadow-md transition-[box-shadow,scale,opacity] duration-200 flex items-center justify-center gap-2 cursor-pointer"
+                    >
+                      <Play className="w-4 h-4 fill-current" />
+                      Bắt Đầu Luyện Tập ({customFilteredQuestions.length} câu)
+                    </button>
+                  </div>
+                </div>
+              </section>
+            </Reveal>
+
+            {/* ==================== SECTION 3: TRA CỨU NHANH TOÀN BỘ 47 CÂU HỎI ==================== */}
+            <Reveal id="home-explorer">
+              <section className="bg-white rounded-3xl border border-slate-200/90 p-4 sm:p-8 shadow-xs space-y-5">
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                  <div>
+                    <h2 className="text-lg sm:text-xl font-extrabold text-slate-900">
+                      Ngân Hàng 47 Câu Hỏi Trong Đề Cương (Tra Cứu &amp; Chọn Câu Nhanh)
+                    </h2>
+                    <p className="text-xs sm:text-sm text-slate-600">
+                      Tìm kiếm nhanh theo từ khóa (ví dụ: <em>pyrite, thạch cao, P₂O₅, oleum, đường mía</em>) hoặc nhấn vào câu bất kì để luyện ngay.
+                    </p>
+                  </div>
+
+                  {/* Search Input */}
+                  <div className="relative w-full md:w-80">
+                    <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="search"
+                      inputMode="search"
+                      enterKeyHint="search"
+                      autoComplete="off"
+                      aria-label="Tìm câu hỏi theo từ khóa hoặc công thức"
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      placeholder="Tìm câu hỏi, công thức hóa học..."
+                      className="w-full pl-10 pr-10 py-2.5 min-h-[44px] rounded-xl border border-slate-200 bg-slate-50 text-sm focus:bg-white focus:outline-none focus:ring-2 focus:ring-teal-600 transition-[background-color,box-shadow] duration-200 [&::-webkit-search-cancel-button]:hidden"
+                    />
+                    {searchQuery && (
+                      <button
+                        type="button"
+                        onClick={() => setSearchQuery("")}
+                        aria-label="Xóa từ khóa tìm kiếm"
+                        className="absolute right-1.5 top-1/2 -translate-y-1/2 w-8 h-8 flex items-center justify-center rounded-lg text-slate-500 hover:bg-slate-200/70 active:scale-90 transition-[background-color,scale]"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Filter Tabs (swipeable row on phones, wrapping from tablets up) */}
+                <div className="flex gap-2 overflow-x-auto no-scrollbar -mx-4 px-4 sm:mx-0 sm:px-0 sm:flex-wrap sm:overflow-visible">
+                  {[
+                    { id: "all", label: "Tất cả (47)" },
+                    { id: "sulfur", label: "Sulfur (Câu 1–12)" },
+                    { id: "so2", label: "Sulfur dioxide (Câu 13–24)" },
+                    { id: "h2so4", label: "Sulfuric acid - Sulfate (Câu 25–40)" },
+                    { id: "true_false", label: "Đúng / Sai (Câu 41–47)" },
+                  ].map((tab) => (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      onClick={() => setExplorerTopic(tab.id as TopicId | "all")}
+                      aria-pressed={explorerTopic === tab.id}
+                        className={`shrink-0 px-3.5 py-1.5 min-h-[40px] rounded-xl text-xs font-bold whitespace-nowrap transition-[background-color,color,scale] duration-150 active:scale-95 ${
+                        explorerTopic === tab.id
+                          ? "bg-teal-700 text-white"
+                          : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                      }`}
+                    >
+                      {tab.label}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Compact Grid of Questions */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-h-[60vh] md:max-h-[420px] overflow-y-auto pr-1">
+                  {explorerQuestions.length === 0 && (
+                    <div className="md:col-span-2 py-10 text-center text-sm text-slate-500 animate-fadeIn">
+                      <Search className="w-6 h-6 mx-auto mb-2 text-slate-400" />
+                      Không tìm thấy câu hỏi nào khớp với{" "}
+                      <strong className="text-slate-700">“{searchQuery.trim()}”</strong>.
+                    </div>
+                  )}
+                  {explorerQuestions.map((q) => {
+                    const p = progressMap[q.id];
+                    const openQuestion = () => {
+                      const idx = CHEMISTRY_QUESTIONS.findIndex(
+                        (x) => x.id === q.id
+                      );
+                      startSession({
+                        questions: CHEMISTRY_QUESTIONS,
+                        title: `Ôn tập: ${q.code} — ${q.topicLabel}`,
+                        modeTag: "explorer",
+                        shuffleQ: false,
+                        shuffleOpt: false,
+                        mode: "instant",
+                        timeMinutes: 0,
+                        layout: "single",
+                        startIndex: idx >= 0 ? idx : 0,
+                      });
+                    };
+                    return (
+                      <div
+                        key={q.id}
+                        role="button"
+                        tabIndex={0}
+                        onClick={openQuestion}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            openQuestion();
+                          }
+                        }}
+                        className="group p-3.5 rounded-2xl border border-slate-200 hover:border-teal-500 hover:bg-teal-50/30 active:scale-[0.99] transition-[background-color,border-color,scale] duration-150 cursor-pointer flex items-start justify-between gap-3"
+                      >
+                        <div className="space-y-1 min-w-0">
+                          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                            <span className="font-mono text-xs font-bold px-2 py-0.5 rounded bg-slate-900 text-white">
+                              {q.code}
+                            </span>
+                            <span className="font-mono text-[11px] font-semibold text-teal-800 bg-teal-50 px-2 py-0.5 rounded border border-teal-200">
+                              {q.keyFormula}
+                            </span>
+                            {q.illustrationId && (
+                              <span className="text-[11px] font-semibold text-amber-800 bg-amber-100 px-2 py-0.5 rounded">
+                                Có hình vẽ
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-xs sm:text-sm text-slate-700 line-clamp-2">
+                            {q.stem}
+                          </p>
+                        </div>
+
+                        <div className="shrink-0">
+                          {p?.status === "mastered" ? (
+                            <CheckCircle2 className="w-5 h-5 text-emerald-600" />
+                          ) : p?.status === "wrong" ? (
+                            <XCircle className="w-5 h-5 text-rose-600" />
+                          ) : (
+                            <ChevronRight className="w-5 h-5 text-slate-400 transition-transform duration-200 group-hover:translate-x-0.5 group-hover:text-teal-600" />
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </section>
+            </Reveal>
 
             {/* ==================== SECTION 4: LỊCH SỬ LÀM BÀI GẦN ĐÂY ==================== */}
             {sessions.length > 0 && (
-              <section className="bg-white rounded-3xl border border-slate-200/90 p-6 shadow-xs space-y-4">
-                <div className="flex items-center justify-between">
+              <section className="bg-white rounded-3xl border border-slate-200/90 p-4 sm:p-6 shadow-xs space-y-4 animate-rise">
+                <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
                   <div className="flex items-center gap-2">
                     <History className="w-5 h-5 text-teal-700" />
                     <h3 className="font-bold text-slate-900">
                       Lịch Sử Các Phiên Ôn Luyện Gần Đây
                     </h3>
                   </div>
+                  {/* Destructive: needs a second tap within 4s to confirm */}
                   <button
                     type="button"
                     onClick={async () => {
+                      if (!resetArmed) {
+                        setResetArmed(true);
+                        return;
+                      }
+                      setResetArmed(false);
                       await resetAllProgress();
                       setProgressMap({});
                       setSessions([]);
                     }}
-                    className="inline-flex items-center gap-1 text-xs font-semibold text-rose-600 hover:underline"
+                    className={`inline-flex items-center gap-1.5 min-h-[40px] px-3 rounded-xl text-xs font-semibold transition-[background-color,color,scale] duration-150 active:scale-95 ${
+                      resetArmed
+                        ? "bg-rose-600 text-white animate-pop"
+                        : "text-rose-600 hover:bg-rose-50"
+                    }`}
                   >
                     <Trash2 className="w-3.5 h-3.5" />
-                    Đặt lại toàn bộ dữ liệu
+                    {resetArmed
+                      ? "Nhấn lần nữa để xóa toàn bộ"
+                      : "Đặt lại toàn bộ dữ liệu"}
                   </button>
                 </div>
 
@@ -2015,7 +2063,7 @@ export default function ChemistryStudyPlatform() {
                   {sessions.slice(0, 4).map((s) => (
                     <div
                       key={s.id}
-                      className="p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-1.5"
+                      className="p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-1.5 hover:border-teal-300 hover:bg-white transition-colors duration-200"
                     >
                       <div className="flex items-center justify-between text-xs">
                         <span className="font-bold text-teal-800 uppercase">
@@ -2045,42 +2093,59 @@ export default function ChemistryStudyPlatform() {
          * VIEW 2: TRANG LÀM BÀI & ÔN LUYỆN (PRACTICE / EXAM WORKSPACE)
          * ==================================================================== */}
         {activeNav === "practice" && (
-          <div className="space-y-6 animate-fadeIn">
+          <div className="space-y-4 sm:space-y-6 stagger">
             {/* Top Workspace Control Bar */}
             <div className="bg-white rounded-2xl border border-slate-200/90 p-3 sm:p-4 shadow-xs space-y-3">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div className="flex items-center gap-2.5 min-w-0">
+              <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2.5">
+                <div className="flex items-center gap-2.5 min-w-0 basis-full lg:basis-0 lg:grow lg:min-w-[260px]">
                   <button
                     type="button"
-                    onClick={() => setActiveNav("home")}
-                    className="p-2 min-w-[40px] min-h-[40px] flex items-center justify-center rounded-xl bg-slate-100 hover:bg-slate-200 active:scale-95 text-slate-700 transition-all shrink-0"
+                    onClick={() => navigateTo("home")}
+                    className="p-2 min-w-[40px] min-h-[40px] flex items-center justify-center rounded-xl bg-slate-100 hover:bg-slate-200 active:scale-95 text-slate-700 transition-[background-color,scale] duration-150 shrink-0"
                     title="Quay về Trang chủ"
                     aria-label="Quay về Trang chủ"
                   >
                     <ChevronLeft className="w-5 h-5" />
                   </button>
-                  <div className="min-w-0">
-                    <h2 className="font-extrabold text-slate-900 text-sm sm:text-base leading-snug">
+                  <div className="min-w-0 flex-1">
+                    <h2 className="font-extrabold text-slate-900 text-sm sm:text-base leading-snug line-clamp-2">
                       {sessionTitle}
                     </h2>
                     <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-500 mt-0.5">
                       <span>
-                        Chế độ:{" "}
+                        <span className="hidden sm:inline">Chế độ: </span>
                         <strong className="text-teal-700">
-                          {feedbackMode === "instant"
-                            ? "Ôn học (Giải thích tức thì)"
-                            : "Phòng thi (Nộp bài chấm điểm)"}
+                          {feedbackMode === "instant" ? "Ôn học" : "Phòng thi"}
+                          <span className="hidden sm:inline">
+                            {feedbackMode === "instant"
+                              ? " (Giải thích tức thì)"
+                              : " (Nộp bài chấm điểm)"}
+                          </span>
                         </strong>
                       </span>
-                      <span>•</span>
+                      <span aria-hidden="true">•</span>
+                      {/* Phones: the clock lives here to keep the toolbar to one row */}
+                      <span className="sm:hidden inline-flex items-center gap-1 font-mono font-bold text-slate-800">
+                        <Clock className="w-3 h-3 text-amber-500" />
+                        <SessionClockText
+                          limitMinutes={sessionTimeLimit}
+                          frozen={isSubmitted}
+                        />
+                      </span>
+                      <span aria-hidden="true" className="sm:hidden">
+                        •
+                      </span>
                       <span>
-                        Đã làm:{" "}
+                        <span className="hidden sm:inline">Đã làm: </span>
                         <strong className="font-mono text-slate-800">
                           {sessionSummary.answered}/{activeQueue.length}
                         </strong>
                       </span>
                       {streakCount >= 2 && (
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 font-bold animate-pop">
+                        <span
+                          key={streakCount}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 font-bold animate-pop"
+                        >
                           <span className="animate-flame-pop inline-block">🔥</span> Chuỗi đúng: {streakCount}
                         </span>
                       )}
@@ -2091,11 +2156,26 @@ export default function ChemistryStudyPlatform() {
                       )}
                     </div>
                   </div>
+
+                  {/* Submit (phones & tablets): always reachable next to the title,
+                      so the toolbar below stays on a single row */}
+                  {!isSubmitted && (
+                    <button
+                      type="button"
+                      onClick={handleSubmitSession}
+                      className="btn-shine lg:hidden shrink-0 inline-flex items-center gap-1.5 px-3 sm:px-4 min-h-[40px] rounded-xl bg-teal-700 hover:bg-teal-800 active:scale-95 text-white font-bold text-xs sm:text-sm shadow-xs transition-[background-color,scale] duration-150"
+                    >
+                      <CheckCircle2 className="w-4 h-4" />
+                      Nộp bài
+                    </button>
+                  )}
                 </div>
 
                 {/* Right Workspace Controls */}
                 <div className="flex flex-wrap items-center gap-2">
-                  {/* Auto-advance toggle (tự chuyển câu) */}
+                  {/* Auto-advance toggle (tự chuyển câu). It only applies to the
+                      one-question-at-a-time layout, so phones hide it in sheet
+                      layout to keep the toolbar on a single row. */}
                   <button
                     type="button"
                     onClick={() => {
@@ -2103,15 +2183,19 @@ export default function ChemistryStudyPlatform() {
                       setAutoAdvance((v) => !v);
                     }}
                     aria-pressed={autoAdvance}
-                    className={`inline-flex items-center gap-1.5 px-3 py-2 min-h-[40px] rounded-xl border text-xs font-bold transition-all active:scale-95 ${
+                    className={`${
+                      workspaceLayout === "sheet" ? "hidden sm:inline-flex" : "inline-flex"
+                    } items-center justify-center gap-1.5 px-3 py-2 min-h-[40px] min-w-[40px] rounded-xl border text-xs font-bold transition-[background-color,border-color,color,scale] duration-200 active:scale-95 ${
                       autoAdvance
                         ? "bg-teal-700 text-white border-teal-700 shadow-xs"
                         : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50"
                     }`}
                     title="Tự chuyển sang câu tiếp theo sau khi chấm, không cần bấm nút chuyển câu"
+                    aria-label="Tự chuyển câu"
                   >
-                    <Zap className="w-3.5 h-3.5" />
-                    <span className="sm:hidden">Tự chuyển</span>
+                    <Zap className={`w-3.5 h-3.5 ${autoAdvance ? "fill-amber-300 text-amber-300" : ""}`} />
+                    {/* Very narrow phones (≤ 360px): icon only, so the row never wraps */}
+                    <span className="max-[359px]:hidden sm:hidden">Tự chuyển</span>
                     <span className="hidden sm:inline">Tự chuyển câu</span>
                     <span
                       className={`hidden sm:inline px-1.5 py-0.5 rounded-full font-mono text-[10px] ${
@@ -2122,45 +2206,60 @@ export default function ChemistryStudyPlatform() {
                     </span>
                   </button>
 
-                  {/* Question palette button (phones only — opens bottom sheet) */}
-                  <button
-                    type="button"
-                    onClick={() => setShowPaletteSheet(true)}
-                    className="lg:hidden inline-flex items-center gap-1.5 px-3 py-2 min-h-[40px] rounded-xl bg-slate-900 text-white text-xs font-bold transition-all active:scale-95"
-                  >
-                    <List className="w-3.5 h-3.5" />
-                    Bảng câu
-                  </button>
-
-                  {/* Layout Switcher: Từng câu vs Tờ đề */}
-                  <div className="inline-flex rounded-xl bg-slate-100 p-1 border border-slate-200">
+                  {/* Question palette button — only needed in sheet layout on
+                      phones/tablets (single layout has it inside the number strip) */}
+                  {workspaceLayout === "sheet" && (
                     <button
                       type="button"
+                      onClick={() => setShowPaletteSheet(true)}
+                      aria-label="Mở bảng điều hướng câu hỏi"
+                      className="lg:hidden inline-flex items-center justify-center gap-1.5 px-3 py-2 min-h-[40px] min-w-[40px] rounded-xl bg-slate-900 text-white text-xs font-bold transition-[scale] duration-150 active:scale-95"
+                    >
+                      <List className="w-3.5 h-3.5" />
+                      <span className="max-[359px]:hidden">Bảng câu</span>
+                    </button>
+                  )}
+
+                  {/* Layout Switcher: Từng câu vs Tờ đề */}
+                  <div
+                    ref={layoutSwitchRef}
+                    className="relative inline-flex rounded-xl bg-slate-100 p-1 border border-slate-200"
+                  >
+                    <span
+                      data-indicator
+                      aria-hidden="true"
+                      className="tab-indicator rounded-lg bg-white shadow-2xs"
+                    />
+                    <button
+                      type="button"
+                      data-active={workspaceLayout === "single"}
+                      aria-pressed={workspaceLayout === "single"}
                       onClick={() => {
                         cancelAutoAdvance();
                         setWorkspaceLayout("single");
                       }}
-                      className={`px-3 py-1.5 min-h-[36px] rounded-lg text-xs font-bold transition-all active:scale-95 ${
-                        workspaceLayout === "single"
-                          ? "bg-white text-teal-800 shadow-2xs"
-                          : "text-slate-600"
+                      className={`relative z-10 px-3 py-1.5 min-h-[36px] rounded-lg text-xs font-bold whitespace-nowrap transition-[color,scale] duration-200 active:scale-95 ${
+                        workspaceLayout === "single" ? "text-teal-800" : "text-slate-600"
                       }`}
                     >
                       Từng câu
                     </button>
                     <button
                       type="button"
+                      data-active={workspaceLayout === "sheet"}
+                      aria-pressed={workspaceLayout === "sheet"}
                       onClick={() => {
                         cancelAutoAdvance();
                         setWorkspaceLayout("sheet");
                       }}
-                      className={`px-3 py-1.5 min-h-[36px] rounded-lg text-xs font-bold transition-all active:scale-95 ${
-                        workspaceLayout === "sheet"
-                          ? "bg-white text-teal-800 shadow-2xs"
-                          : "text-slate-600"
+                      className={`relative z-10 px-3 py-1.5 min-h-[36px] rounded-lg text-xs font-bold whitespace-nowrap transition-[color,scale] duration-200 active:scale-95 ${
+                        workspaceLayout === "sheet" ? "text-teal-800" : "text-slate-600"
                       }`}
                     >
-                      Toàn tờ đề ({activeQueue.length})
+                      <span className="sm:hidden">Tờ đề</span>
+                      <span className="hidden sm:inline">
+                        Toàn tờ đề ({activeQueue.length})
+                      </span>
                     </button>
                   </div>
 
@@ -2168,31 +2267,29 @@ export default function ChemistryStudyPlatform() {
                   <button
                     type="button"
                     onClick={handleReshuffleCurrentSession}
-                    className="inline-flex items-center gap-1.5 px-3 py-2 min-h-[40px] rounded-xl bg-amber-50 hover:bg-amber-100 active:scale-95 text-amber-900 border border-amber-200 text-xs font-bold transition-all cursor-pointer"
+                    className="group inline-flex items-center gap-1.5 px-3 py-2 min-h-[40px] min-w-[40px] justify-center rounded-xl bg-amber-50 hover:bg-amber-100 active:scale-95 text-amber-900 border border-amber-200 text-xs font-bold transition-[background-color,scale] duration-150 cursor-pointer"
                     title="Xáo trộn lại thứ tự câu hỏi và làm mới"
+                    aria-label="Xáo trộn lại thứ tự câu hỏi và làm mới"
                   >
-                    <Shuffle className="w-3.5 h-3.5" />
+                    <Shuffle className="w-3.5 h-3.5 transition-transform duration-300 group-hover:rotate-180" />
                     <span className="hidden sm:inline">Xáo trộn lại</span>
                   </button>
 
-                  {/* Timer Pill */}
-                  <div className="inline-flex items-center gap-1.5 px-3 py-2 min-h-[40px] rounded-xl bg-slate-900 text-white font-mono text-xs font-bold">
+                  {/* Timer Pill (tablet & desktop) */}
+                  <div className="hidden sm:inline-flex items-center gap-1.5 px-3 py-2 min-h-[40px] rounded-xl bg-slate-900 text-white font-mono text-xs font-bold">
                     <Clock className="w-3.5 h-3.5 text-amber-300" />
-                    {remainingSeconds !== null ? (
-                      <span className={remainingSeconds < 60 ? "text-rose-400 animate-pulse" : ""}>
-                        Còn {formatTime(remainingSeconds)}
-                      </span>
-                    ) : (
-                      <span>{formatTime(elapsedSeconds)}</span>
-                    )}
+                    <SessionClockText
+                      limitMinutes={sessionTimeLimit}
+                      frozen={isSubmitted}
+                    />
                   </div>
 
-                  {/* Submit / Finish Button */}
+                  {/* Submit / Finish Button (desktop) */}
                   {!isSubmitted && (
                     <button
                       type="button"
                       onClick={handleSubmitSession}
-                      className="inline-flex items-center gap-1.5 px-4 py-2 min-h-[40px] rounded-xl bg-teal-700 hover:bg-teal-800 active:scale-95 text-white font-bold text-xs sm:text-sm shadow-xs transition-all cursor-pointer"
+                      className="btn-shine hidden lg:inline-flex items-center gap-1.5 px-4 py-2 min-h-[40px] rounded-xl bg-teal-700 hover:bg-teal-800 active:scale-95 text-white font-bold text-sm shadow-xs transition-[background-color,scale] duration-150 cursor-pointer"
                     >
                       <CheckCircle2 className="w-4 h-4" />
                       Nộp bài &amp; Tổng kết
@@ -2203,49 +2300,52 @@ export default function ChemistryStudyPlatform() {
 
               {/* Session progress bar */}
               <div className="space-y-1.5">
-                <div className="flex items-center justify-between text-[11px] font-semibold text-slate-500">
+                <div className="short:hidden flex items-center justify-between text-[11px] font-semibold text-slate-500">
                   <span>Tiến độ làm bài</span>
                   <span className="font-mono">
                     {sessionSummary.answered}/{activeQueue.length} câu • {sessionSummary.scale10}đ
                   </span>
                 </div>
-                <div className="h-2 rounded-full bg-slate-100 overflow-hidden">
-                  <div
-                    className="h-full bg-gradient-to-r from-teal-500 to-emerald-400 rounded-full transition-all duration-500"
-                    style={{
-                      width: `${
-                        activeQueue.length
-                          ? (sessionSummary.answered / activeQueue.length) * 100
-                          : 0
-                      }%`,
-                    }}
-                  />
-                </div>
+                <ProgressBar
+                  percent={sessionPercent}
+                  barClassName="bg-gradient-to-r from-teal-500 to-emerald-400"
+                  label="Tiến độ làm bài"
+                />
               </div>
             </div>
 
             {/* Post-Submission Result Banner */}
             {isSubmitted && (
-              <div className="rounded-3xl bg-gradient-to-r from-slate-900 via-teal-950 to-slate-900 text-white p-6 sm:p-8 shadow-lg border border-teal-700/50 animate-fadeIn">
-                <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
-                  <div className="space-y-2">
-                    <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-amber-400/20 text-amber-300 text-xs font-bold">
-                      <Award className="w-4 h-4" />
-                      BẢNG ĐIỂM TỔNG KẾT PHIÊN LÀM BÀI
+              <div className="relative overflow-hidden rounded-3xl bg-gradient-to-r from-slate-900 via-teal-950 to-slate-900 text-white p-5 sm:p-8 shadow-lg border border-teal-700/50 animate-rise">
+                <div
+                  aria-hidden="true"
+                  className="orb-a absolute -top-20 -right-16 w-72 h-72 rounded-full bg-teal-400/15 blur-3xl pointer-events-none"
+                />
+                <div className="relative flex flex-col md:flex-row md:items-center justify-between gap-5 sm:gap-6">
+                  <div className="flex items-center gap-4 sm:gap-6 min-w-0">
+                    <ScoreRing score={sessionSummary.scale10} max={10} />
+                    <div className="space-y-2 min-w-0">
+                      <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-amber-400/20 text-amber-300 text-[11px] sm:text-xs font-bold">
+                        <Award className="w-4 h-4 shrink-0" />
+                        BẢNG ĐIỂM TỔNG KẾT PHIÊN LÀM BÀI
+                      </div>
+                      <h3 className="text-xl sm:text-3xl font-extrabold">
+                        Điểm số quy đổi:{" "}
+                        <span className="text-amber-300 font-mono whitespace-nowrap">
+                          {sessionSummary.scale10.toFixed(2)} / 10.0
+                        </span>
+                      </h3>
+                      <p className="text-sm text-slate-300">
+                        Số câu đúng tuyệt đối:{" "}
+                        <strong className="text-emerald-300">
+                          {sessionSummary.correct}/{activeQueue.length} câu
+                        </strong>{" "}
+                        • Thời gian hoàn thành:{" "}
+                        <strong>
+                          <SessionClockText limitMinutes={0} frozen />
+                        </strong>
+                      </p>
                     </div>
-                    <h3 className="text-2xl sm:text-3xl font-extrabold">
-                      Điểm số quy đổi:{" "}
-                      <span className="text-amber-300 font-mono">
-                        {sessionSummary.scale10.toFixed(2)} / 10.0
-                      </span>
-                    </h3>
-                    <p className="text-sm text-slate-300">
-                      Số câu đúng tuyệt đối:{" "}
-                      <strong className="text-emerald-300">
-                        {sessionSummary.correct}/{activeQueue.length} câu
-                      </strong>{" "}
-                      • Thời gian hoàn thành: <strong>{formatTime(elapsedSeconds)}</strong>
-                    </p>
                   </div>
 
                   <div className="flex flex-wrap items-center gap-3">
@@ -2268,7 +2368,7 @@ export default function ChemistryStudyPlatform() {
                             });
                           }
                         }}
-                        className="inline-flex items-center gap-2 px-5 py-3 rounded-2xl bg-rose-500 hover:bg-rose-400 text-white font-bold text-sm shadow-md transition-all cursor-pointer"
+                        className="inline-flex items-center justify-center gap-2 w-full sm:w-auto px-5 py-3 min-h-[48px] rounded-2xl bg-rose-500 hover:bg-rose-400 hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98] text-white font-bold text-sm shadow-md transition-[background-color,translate,scale] duration-200 cursor-pointer"
                       >
                         <Flame className="w-4 h-4" />
                         Luyện lại các câu vừa sai
@@ -2288,7 +2388,7 @@ export default function ChemistryStudyPlatform() {
                           timeMinutes: sessionTimeLimit,
                         })
                       }
-                      className="inline-flex items-center gap-2 px-5 py-3 rounded-2xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold text-sm shadow-md transition-all cursor-pointer"
+                      className="inline-flex items-center justify-center gap-2 w-full sm:w-auto px-5 py-3 min-h-[48px] rounded-2xl bg-amber-400 hover:bg-amber-300 hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98] text-slate-950 font-bold text-sm shadow-md transition-[background-color,translate,scale] duration-200 cursor-pointer"
                     >
                       <RefreshCw className="w-4 h-4" />
                       Làm lại đề này
@@ -2299,38 +2399,43 @@ export default function ChemistryStudyPlatform() {
             )}
 
             {/* Main 2-Column Workspace Grid */}
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 sm:gap-6 items-start">
               {/* LEFT / MAIN QUESTION COLUMN (8 cols) */}
-              <div className="lg:col-span-8 space-y-6">
+              <div className="lg:col-span-8 space-y-4 sm:space-y-6 min-w-0">
                 {workspaceLayout === "single" ? (
                   <>
-                    {/* Mobile compact palette strip (horizontal scroll) */}
-                    <div className="lg:hidden bg-white rounded-2xl border border-slate-200/90 p-2.5 shadow-xs">
-                      <div className="flex gap-1.5 overflow-x-auto no-scrollbar py-0.5 px-0.5">
+                    {/* Compact palette strip for phones & tablets (horizontal scroll,
+                        auto-centres the current question) */}
+                    <div className="lg:hidden flex items-center gap-2 bg-white rounded-2xl border border-slate-200/90 p-2 shadow-xs">
+                      <button
+                        type="button"
+                        onClick={() => setShowPaletteSheet(true)}
+                        aria-label="Mở bảng điều hướng câu hỏi"
+                        title="Bảng câu hỏi"
+                        className="shrink-0 w-10 h-10 flex items-center justify-center rounded-xl bg-slate-900 text-white active:scale-90 transition-[scale] duration-150"
+                      >
+                        <LayoutGrid className="w-4 h-4" />
+                      </button>
+                      <div
+                        ref={paletteStripRef}
+                        className="relative flex-1 flex gap-1.5 overflow-x-auto no-scrollbar py-1 px-1 scroll-smooth"
+                      >
                         {activeQueue.map((q, idx) => {
-                          const answered = isQuestionAnswered(q);
-                          const checked = Boolean(checkedQuestions[q.id] || isSubmitted);
-                          const correct = isQuestionCorrect(q);
                           const isCurrent = currentIdx === idx;
-                          let chip =
-                            "bg-slate-100 text-slate-600 border-slate-200";
-                          if (checked) {
-                            chip = correct
-                              ? "bg-emerald-600 text-white border-emerald-600"
-                              : answered
-                              ? "bg-rose-600 text-white border-rose-600"
-                              : "bg-amber-100 text-amber-900 border-amber-300";
-                          } else if (answered) {
-                            chip = "bg-teal-700 text-white border-teal-700";
-                          }
                           return (
                             <button
                               key={q.id}
                               type="button"
                               onClick={() => goToQuestion(idx)}
                               aria-label={`Câu ${idx + 1}`}
-                              className={`shrink-0 w-10 h-10 rounded-xl font-mono text-xs font-bold border transition-all active:scale-95 ${chip} ${
-                                isCurrent ? "ring-2 ring-offset-1 ring-slate-900" : ""
+                              aria-current={isCurrent ? "true" : undefined}
+                              data-current={isCurrent}
+                              className={`shrink-0 w-10 h-10 rounded-xl font-mono text-xs border transition-[background-color,border-color,color,scale] duration-200 active:scale-90 ${
+                                PALETTE_STYLES[paletteStates[idx]]
+                              } ${
+                                isCurrent
+                                  ? "ring-2 ring-offset-1 ring-slate-900 scale-105"
+                                  : ""
                               }`}
                             >
                               {idx + 1}
@@ -2344,7 +2449,7 @@ export default function ChemistryStudyPlatform() {
                     <div
                       ref={questionCardRef}
                       key={activeQueue[currentIdx]?.id}
-                      className={`scroll-mt-24 ${
+                      className={`scroll-mt-24 short:scroll-mt-3 ${
                         slideDirection === "next"
                           ? "animate-slide-next"
                           : slideDirection === "prev"
@@ -2386,7 +2491,7 @@ export default function ChemistryStudyPlatform() {
                       <button
                         type="button"
                         onClick={cancelAutoAdvance}
-                        className="w-full text-left bg-teal-700 text-white rounded-2xl px-4 py-3 shadow-md animate-toast-in active:scale-[0.99] transition-transform"
+                        className="w-full text-left bg-teal-700 text-white rounded-2xl px-4 py-3 shadow-md animate-toast-in active:scale-[0.99] transition-[scale] duration-150"
                       >
                         <span className="flex items-center gap-2 text-sm font-bold">
                           <Zap className="w-4 h-4 text-amber-300 shrink-0" />
@@ -2395,7 +2500,7 @@ export default function ChemistryStudyPlatform() {
                         <span className="block h-1 mt-2 rounded-full bg-white/20 overflow-hidden">
                           <span
                             key={autoAdvanceDelayMs}
-                            className="block h-full bg-amber-300 rounded-full animate-countdown-bar"
+                            className="block h-full w-full bg-amber-300 rounded-full animate-countdown-bar"
                             style={{ animationDuration: `${autoAdvanceDelayMs}ms` }}
                           />
                         </span>
@@ -2403,15 +2508,16 @@ export default function ChemistryStudyPlatform() {
                     )}
 
                     {/* Bottom Prev / Next Navigation Bar */}
-                    <div className="flex items-center justify-between gap-2 bg-white rounded-2xl border border-slate-200/90 p-3 sm:p-4 shadow-xs">
+                    <div className="flex items-center justify-between gap-2 bg-white rounded-2xl border border-slate-200/90 p-2.5 sm:p-4 shadow-xs">
                       <button
                         type="button"
                         disabled={currentIdx === 0}
                         onClick={() => goToQuestion(currentIdx - 1, "prev")}
-                        className="inline-flex items-center gap-2 px-4 py-2.5 min-h-[52px] rounded-xl bg-slate-100 hover:bg-slate-200 active:scale-95 disabled:opacity-40 text-slate-800 font-bold text-xs sm:text-sm transition-all cursor-pointer"
+                        className="group inline-flex items-center gap-1.5 sm:gap-2 px-3.5 sm:px-4 py-2.5 min-h-[52px] whitespace-nowrap rounded-xl bg-slate-100 hover:bg-slate-200 active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed text-slate-800 font-bold text-xs sm:text-sm transition-[background-color,scale,opacity] duration-150 cursor-pointer"
                       >
-                        <ChevronLeft className="w-4 h-4" />
-                        Câu trước
+                        <ChevronLeft className="w-4 h-4 transition-transform duration-200 group-hover:-translate-x-0.5" />
+                        <span className="max-[359px]:hidden">Câu trước</span>
+                        <span className="min-[360px]:hidden">Trước</span>
                       </button>
 
                       <span className="font-mono text-xs sm:text-sm font-bold text-slate-600 whitespace-nowrap">
@@ -2422,10 +2528,11 @@ export default function ChemistryStudyPlatform() {
                         type="button"
                         disabled={currentIdx >= activeQueue.length - 1}
                         onClick={() => goToQuestion(currentIdx + 1, "next")}
-                        className="inline-flex items-center gap-2 px-5 py-2.5 min-h-[52px] rounded-xl bg-teal-700 hover:bg-teal-800 active:scale-95 disabled:opacity-40 text-white font-bold text-xs sm:text-sm transition-all cursor-pointer"
+                        className="group inline-flex items-center gap-1.5 sm:gap-2 px-3.5 sm:px-5 py-2.5 min-h-[52px] whitespace-nowrap rounded-xl bg-teal-700 hover:bg-teal-800 active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed text-white font-bold text-xs sm:text-sm transition-[background-color,scale,opacity] duration-150 cursor-pointer"
                       >
-                        Câu tiếp theo
-                        <ChevronRight className="w-4 h-4" />
+                        <span className="max-[359px]:hidden">Câu tiếp theo</span>
+                        <span className="min-[360px]:hidden">Tiếp</span>
+                        <ChevronRight className="w-4 h-4 transition-transform duration-200 group-hover:translate-x-0.5" />
                       </button>
                     </div>
                     <p className="hidden md:block text-center text-[11px] text-slate-400">
@@ -2433,9 +2540,12 @@ export default function ChemistryStudyPlatform() {
                     </p>
                   </>
                 ) : (
-                  /* FULL SHEET SCROLL LAYOUT (Xem toàn bộ tờ đề liền mạch) */
-                  <div className="space-y-6">
-                    {activeQueue.map((q, idx) => renderQuestionCard(q, idx))}
+                  /* FULL SHEET SCROLL LAYOUT (Xem toàn bộ tờ đề liền mạch).
+                     Cards are memoised and skipped by the browser while off-screen. */
+                  <div className="space-y-4 sm:space-y-6">
+                    {activeQueue.map((q, idx) =>
+                      renderQuestionCard(q, idx, "cv-auto scroll-mt-2")
+                    )}
                   </div>
                 )}
               </div>
@@ -2457,70 +2567,24 @@ export default function ChemistryStudyPlatform() {
                     </span>
                   </div>
 
-                  {/* Color Legend */}
-                  <div className="grid grid-cols-2 gap-2 text-[11px] font-medium text-slate-600">
-                    <div className="flex items-center gap-1.5">
-                      <span className="w-3 h-3 rounded bg-emerald-500 inline-block" />
-                      <span>Làm đúng ({sessionSummary.correct})</span>
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                      <span className="w-3 h-3 rounded bg-rose-500 inline-block" />
-                      <span>Làm sai ({sessionSummary.wrong})</span>
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                      <span className="w-3 h-3 rounded bg-teal-600 inline-block" />
-                      <span>Đã chọn ({sessionSummary.answered})</span>
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                      <span className="w-3 h-3 rounded bg-slate-200 inline-block" />
-                      <span>
-                        Chưa làm ({activeQueue.length - sessionSummary.answered})
-                      </span>
-                    </div>
-                  </div>
+                  {renderPaletteLegend()}
 
                   {/* Question Number Grid */}
-                  <div className="grid grid-cols-6 gap-2 max-h-[340px] overflow-y-auto p-1">
+                  <div className="grid grid-cols-7 xl:grid-cols-8 gap-1.5 max-h-[min(340px,calc(100dvh-27rem))] min-h-[6.5rem] overflow-y-auto overscroll-contain p-1">
                     {activeQueue.map((q, idx) => {
                       const isCurrent =
                         workspaceLayout === "single" && currentIdx === idx;
-                      const answered = isQuestionAnswered(q);
-                      const checked = Boolean(checkedQuestions[q.id] || isSubmitted);
-                      const correct = isQuestionCorrect(q);
                       const bookmarked = Boolean(progressMap[q.id]?.bookmarked);
-
-                      let btnStyle =
-                        "bg-slate-100 text-slate-700 border-slate-200 hover:bg-slate-200";
-                      if (checked) {
-                        if (correct) {
-                          btnStyle =
-                            "bg-emerald-600 text-white border-emerald-600 font-bold";
-                        } else if (answered) {
-                          btnStyle =
-                            "bg-rose-600 text-white border-rose-600 font-bold";
-                        } else {
-                          btnStyle =
-                            "bg-amber-100 text-amber-900 border-amber-300";
-                        }
-                      } else if (answered) {
-                        btnStyle = "bg-teal-700 text-white border-teal-700 font-bold";
-                      }
-
                       return (
                         <button
                           key={q.id}
                           type="button"
-                          onClick={() => {
-                            if (workspaceLayout === "single") {
-                              goToQuestion(idx);
-                            } else {
-                              const el = document.getElementById(
-                                `question-card-${q.id}`
-                              );
-                              el?.scrollIntoView({ behavior: "smooth", block: "center" });
-                            }
-                          }}
-                          className={`relative h-10 rounded-xl font-mono text-xs border transition-all active:scale-95 flex items-center justify-center cursor-pointer ${btnStyle} ${
+                          onClick={() => jumpToQuestion(idx)}
+                          aria-label={`Câu ${idx + 1}`}
+                          aria-current={isCurrent ? "true" : undefined}
+                          className={`relative h-10 rounded-xl font-mono text-xs border transition-[background-color,border-color,color,scale] duration-200 hover:brightness-95 active:scale-95 flex items-center justify-center cursor-pointer ${
+                            PALETTE_STYLES[paletteStates[idx]]
+                          } ${
                             isCurrent ? "ring-2 ring-offset-2 ring-slate-900 scale-105" : ""
                           }`}
                         >
@@ -2534,130 +2598,27 @@ export default function ChemistryStudyPlatform() {
                   </div>
 
                   {/* Quick Filter Actions inside Sidebar */}
-                  <div className="pt-3 border-t border-slate-100 space-y-2">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        cancelAutoAdvance();
-                        setFeedbackMode((m) => (m === "instant" ? "exam" : "instant"));
-                      }}
-                      className="w-full py-2.5 px-3 min-h-[44px] rounded-xl bg-slate-50 hover:bg-slate-100 active:scale-[0.99] border border-slate-200 text-xs font-semibold text-slate-700 flex items-center justify-between transition-all"
-                    >
-                      <span>Đổi chế độ phản hồi:</span>
-                      <strong className="text-teal-700">
-                        {feedbackMode === "instant" ? "Giải thích ngay" : "Nộp bài"}
-                      </strong>
-                    </button>
-
-                    <label className="flex items-center justify-between py-2.5 px-3 min-h-[44px] rounded-xl bg-slate-50 border border-slate-200 cursor-pointer text-xs font-semibold text-slate-700">
-                      <span>Xáo trộn đáp án A-B-C-D</span>
-                      <input
-                        type="checkbox"
-                        checked={shuffleOptions}
-                        onChange={(e) => {
-                          const nextVal = e.target.checked;
-                          setShuffleOptions(nextVal);
-                          buildPermutations(activeQueue, nextVal);
-                        }}
-                        className="w-4 h-4 accent-teal-700 rounded"
-                      />
-                    </label>
+                  <div className="pt-3 border-t border-slate-100">
+                    {renderQuickControls()}
                   </div>
                 </div>
               </div>
             </div>
-
-            {/* Mobile bottom-sheet question palette */}
-            {showPaletteSheet && (
-              <div className="fixed inset-0 z-50 lg:hidden flex items-end justify-center">
-                <div
-                  className="absolute inset-0 bg-slate-950/50 backdrop-blur-sm"
-                  onClick={() => setShowPaletteSheet(false)}
-                />
-                <div className="relative w-full max-w-lg bg-white rounded-t-3xl p-5 pb-8 safe-bottom shadow-2xl animate-toast-in max-h-[80vh] overflow-y-auto">
-                  <div className="flex items-center justify-between mb-1">
-                    <h3 className="font-extrabold text-slate-900 text-base">
-                      Bảng điều hướng câu hỏi
-                    </h3>
-                    <button
-                      type="button"
-                      onClick={() => setShowPaletteSheet(false)}
-                      aria-label="Đóng bảng câu hỏi"
-                      className="p-2 min-w-[40px] min-h-[40px] flex items-center justify-center rounded-xl bg-slate-100 active:scale-95 text-slate-700"
-                    >
-                      <X className="w-5 h-5" />
-                    </button>
-                  </div>
-                  <p className="text-xs text-slate-500 mb-4">
-                    Đã làm {sessionSummary.answered}/{activeQueue.length} câu • {sessionSummary.scale10}đ • Đúng {sessionSummary.correct} • Sai {sessionSummary.wrong}
-                  </p>
-                  <div className="grid grid-cols-6 gap-2">
-                    {activeQueue.map((q, idx) => {
-                      const answered = isQuestionAnswered(q);
-                      const checked = Boolean(checkedQuestions[q.id] || isSubmitted);
-                      const correct = isQuestionCorrect(q);
-                      const isCurrent = currentIdx === idx;
-                      let btnStyle =
-                        "bg-slate-100 text-slate-700 border-slate-200";
-                      if (checked) {
-                        btnStyle = correct
-                          ? "bg-emerald-600 text-white border-emerald-600 font-bold"
-                          : answered
-                          ? "bg-rose-600 text-white border-rose-600 font-bold"
-                          : "bg-amber-100 text-amber-900 border-amber-300";
-                      } else if (answered) {
-                        btnStyle = "bg-teal-700 text-white border-teal-700 font-bold";
-                      }
-                      return (
-                        <button
-                          key={q.id}
-                          type="button"
-                          onClick={() => {
-                            setShowPaletteSheet(false);
-                            goToQuestion(idx);
-                          }}
-                          className={`h-11 rounded-xl font-mono text-sm border transition-all active:scale-95 ${btnStyle} ${
-                            isCurrent ? "ring-2 ring-offset-1 ring-slate-900" : ""
-                          }`}
-                        >
-                          {idx + 1}
-                        </button>
-                      );
-                    })}
-                  </div>
-                  <div className="grid grid-cols-2 gap-2 mt-4 text-[11px] font-medium text-slate-600">
-                    <div className="flex items-center gap-1.5">
-                      <span className="w-3 h-3 rounded bg-emerald-500 inline-block" />
-                      <span>Làm đúng ({sessionSummary.correct})</span>
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                      <span className="w-3 h-3 rounded bg-rose-500 inline-block" />
-                      <span>Làm sai ({sessionSummary.wrong})</span>
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                      <span className="w-3 h-3 rounded bg-teal-600 inline-block" />
-                      <span>Đã chọn ({sessionSummary.answered})</span>
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                      <span className="w-3 h-3 rounded bg-slate-200 inline-block" />
-                      <span>Chưa làm ({activeQueue.length - sessionSummary.answered})</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            )}
           </div>
-
         )}
 
         {/* ====================================================================
          * VIEW 3: KHO CÂU SAI & ĐÁNH DẤU SAO (WRONG-ANSWER VAULT)
          * ==================================================================== */}
         {activeNav === "wrong_vault" && (
-          <div className="space-y-8 animate-fadeIn">
+          <div className="space-y-6 sm:space-y-8 stagger">
             {/* Header Banner */}
-            <div className="bg-gradient-to-r from-rose-950 via-slate-900 to-slate-900 text-white rounded-3xl p-6 sm:p-8 shadow-lg flex flex-col md:flex-row md:items-center justify-between gap-6">
-              <div className="space-y-2">
+            <div className="relative overflow-hidden bg-gradient-to-r from-rose-950 via-slate-900 to-slate-900 text-white rounded-3xl p-5 sm:p-8 shadow-lg flex flex-col md:flex-row md:items-center justify-between gap-5 sm:gap-6">
+              <div
+                aria-hidden="true"
+                className="orb-b absolute -top-24 -left-20 w-72 h-72 rounded-full bg-rose-500/15 blur-3xl pointer-events-none"
+              />
+              <div className="relative space-y-2">
                 <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-rose-500/20 text-rose-300 text-xs font-bold border border-rose-400/30">
                   <Flame className="w-4 h-4" />
                   KHO CÂU SAI &amp; CÂU ĐÁNH DẤU SAO
@@ -2670,7 +2631,7 @@ export default function ChemistryStudyPlatform() {
                 </p>
               </div>
 
-              <div className="flex flex-wrap items-center gap-3 shrink-0">
+              <div className="relative flex flex-wrap items-center gap-3 md:shrink-0">
                 {wrongQuestionsList.length > 0 && (
                   <button
                     type="button"
@@ -2684,7 +2645,7 @@ export default function ChemistryStudyPlatform() {
                         mode: "instant",
                       })
                     }
-                    className="inline-flex items-center gap-2 px-5 py-3 rounded-2xl bg-rose-500 hover:bg-rose-400 text-white font-bold text-sm shadow-lg transition-all cursor-pointer"
+                    className="btn-shine inline-flex items-center justify-center gap-2 w-full sm:w-auto px-5 py-3 min-h-[48px] rounded-2xl bg-rose-500 hover:bg-rose-400 hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98] text-white font-bold text-sm shadow-lg transition-[background-color,translate,scale] duration-200 cursor-pointer"
                   >
                     <Play className="w-4 h-4 fill-current" />
                     Luyện Ngay {wrongQuestionsList.length} Câu Sai (Xáo trộn)
@@ -2704,7 +2665,7 @@ export default function ChemistryStudyPlatform() {
                         mode: "instant",
                       })
                     }
-                    className="inline-flex items-center gap-2 px-5 py-3 rounded-2xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold text-sm shadow-lg transition-all cursor-pointer"
+                    className="btn-shine inline-flex items-center justify-center gap-2 w-full sm:w-auto px-5 py-3 min-h-[48px] rounded-2xl bg-amber-400 hover:bg-amber-300 hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98] text-slate-950 font-bold text-sm shadow-lg transition-[background-color,translate,scale] duration-200 cursor-pointer"
                   >
                     <Star className="w-4 h-4 fill-current" />
                     Ôn {bookmarkedQuestionsList.length} Câu Gắn Sao
@@ -2715,9 +2676,9 @@ export default function ChemistryStudyPlatform() {
 
             {/* Wrong Questions List */}
             <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <h3 className="text-lg font-extrabold text-slate-900 flex items-center gap-2">
-                  <XCircle className="w-5 h-5 text-rose-600" />
+              <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+                <h3 className="text-base sm:text-lg font-extrabold text-slate-900 flex items-center gap-2">
+                  <XCircle className="w-5 h-5 text-rose-600 shrink-0" />
                   Danh sách Câu đang làm sai ({wrongQuestionsList.length} câu)
                 </h3>
                 {wrongQuestionsList.length > 0 && (
@@ -2736,7 +2697,7 @@ export default function ChemistryStudyPlatform() {
                         return next;
                       });
                     }}
-                    className="text-xs font-bold text-emerald-700 hover:underline"
+                    className="min-h-[40px] px-3 rounded-xl text-xs font-bold text-emerald-700 hover:bg-emerald-50 active:scale-95 transition-[background-color,scale] duration-150"
                   >
                     Đánh dấu tất cả là Đã hiểu ✓
                   </button>
@@ -2744,8 +2705,8 @@ export default function ChemistryStudyPlatform() {
               </div>
 
               {wrongQuestionsList.length === 0 ? (
-                <div className="bg-white rounded-3xl border border-slate-200 p-10 text-center space-y-3">
-                  <div className="w-14 h-14 rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center mx-auto">
+                <div className="bg-white rounded-3xl border border-slate-200 p-6 sm:p-10 text-center space-y-3">
+                  <div className="w-14 h-14 rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center mx-auto animate-pop">
                     <CheckCircle2 className="w-8 h-8" />
                   </div>
                   <h4 className="text-lg font-bold text-slate-900">
@@ -2762,10 +2723,10 @@ export default function ChemistryStudyPlatform() {
                     return (
                       <div
                         key={q.id}
-                        className="bg-white rounded-2xl border-2 border-rose-200 p-5 shadow-xs space-y-3"
+                        className="cv-auto bg-white rounded-2xl border-2 border-rose-200 p-4 sm:p-5 shadow-xs space-y-3 hover:border-rose-300 hover:shadow-md transition-[border-color,box-shadow] duration-200"
                       >
                         <div className="flex flex-wrap items-center justify-between gap-2">
-                          <div className="flex items-center gap-2">
+                          <div className="flex flex-wrap items-center gap-2">
                             <span className="px-3 py-1 rounded-lg bg-rose-600 text-white font-mono text-xs font-bold">
                               {q.code}
                             </span>
@@ -2783,7 +2744,7 @@ export default function ChemistryStudyPlatform() {
                               onClick={() =>
                                 syncQuestionProgress(q.id, { status: "mastered" })
                               }
-                              className="px-3 py-1.5 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 text-xs font-bold transition-colors"
+                              className="px-3 py-1.5 min-h-[40px] rounded-xl bg-emerald-50 hover:bg-emerald-100 active:scale-95 text-emerald-800 border border-emerald-200 text-xs font-bold transition-[background-color,scale] duration-150"
                             >
                               ✓ Đã thuộc &amp; Xóa khỏi kho sai
                             </button>
@@ -2840,8 +2801,8 @@ export default function ChemistryStudyPlatform() {
          * VIEW 4: CẨM NANG LÝ THUYẾT & FLASHCARD (THEORY HUB)
          * ==================================================================== */}
         {activeNav === "theory" && (
-          <div className="animate-fadeIn">
-            <ChemistryTheoryHub
+          <div>
+            <LazyTheoryHub
               onStartTopicQuiz={(topicId) => {
                 const topicMeta = TOPICS_META.find((t) => t.id === topicId);
                 const list = CHEMISTRY_QUESTIONS.filter((q) => q.topic === topicId);
@@ -2859,11 +2820,82 @@ export default function ChemistryStudyPlatform() {
         )}
       </main>
 
+      {/* ==================== MOBILE BOTTOM-SHEET QUESTION PALETTE ====================
+          Rendered at the root (not inside the animated view) so `position: fixed`
+          is always relative to the screen. */}
+      {activeNav === "practice" && showPaletteSheet && (
+        <div
+          className="fixed inset-0 z-50 lg:hidden flex items-end justify-center"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="palette-sheet-title"
+        >
+          <div
+            className="absolute inset-0 bg-slate-950/55 animate-backdrop-in"
+            onClick={() => setShowPaletteSheet(false)}
+          />
+          <div className="relative w-full max-w-lg bg-white rounded-t-3xl shadow-2xl animate-sheet-up max-h-[85dvh] flex flex-col">
+            <div className="shrink-0 px-5 pt-2.5 pb-3 border-b border-slate-100">
+              <div aria-hidden="true" className="mx-auto mb-2.5 h-1.5 w-10 rounded-full bg-slate-200" />
+              <div className="flex items-center justify-between gap-3">
+                <h3 id="palette-sheet-title" className="font-extrabold text-slate-900 text-base">
+                  Bảng điều hướng câu hỏi
+                </h3>
+                <button
+                  ref={paletteCloseRef}
+                  type="button"
+                  onClick={() => setShowPaletteSheet(false)}
+                  aria-label="Đóng bảng câu hỏi"
+                  className="p-2 min-w-[40px] min-h-[40px] flex items-center justify-center rounded-xl bg-slate-100 active:scale-90 text-slate-700 transition-[scale] duration-150"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+              <p className="text-xs text-slate-500 mt-1">
+                Đã làm {sessionSummary.answered}/{activeQueue.length} câu • {sessionSummary.scale10}đ • Đúng {sessionSummary.correct} • Sai {sessionSummary.wrong}
+              </p>
+            </div>
+
+            <div className="flex-1 overflow-y-auto overscroll-contain px-5 pt-4 pb-[max(1.25rem,env(safe-area-inset-bottom))] space-y-4">
+              <div className="grid grid-cols-6 min-[480px]:grid-cols-8 gap-2">
+                {activeQueue.map((q, idx) => {
+                  const isCurrent =
+                    workspaceLayout === "single" && currentIdx === idx;
+                  const bookmarked = Boolean(progressMap[q.id]?.bookmarked);
+                  return (
+                    <button
+                      key={q.id}
+                      type="button"
+                      onClick={() => {
+                        setShowPaletteSheet(false);
+                        jumpToQuestion(idx);
+                      }}
+                      aria-label={`Câu ${idx + 1}`}
+                      aria-current={isCurrent ? "true" : undefined}
+                      className={`relative h-11 rounded-xl font-mono text-sm border transition-[background-color,scale] duration-150 active:scale-90 ${
+                        PALETTE_STYLES[paletteStates[idx]]
+                      } ${isCurrent ? "ring-2 ring-offset-1 ring-slate-900" : ""}`}
+                    >
+                      {idx + 1}
+                      {bookmarked && (
+                        <span className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-amber-400 border border-white" />
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+              {renderPaletteLegend()}
+              {renderQuickControls()}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ==================== FOOTER ==================== */}
-      <footer className="bg-white border-t border-slate-200/80 py-6 mt-12">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-slate-500">
+      <footer className="bg-white border-t border-slate-200/80 py-6 mt-10 sm:mt-12">
+        <div className="max-w-7xl 2xl:max-w-[1440px] mx-auto page-gutter flex flex-col sm:flex-row items-center justify-between gap-3 sm:gap-4 text-xs text-slate-500 text-center sm:text-left">
           <div className="flex items-center gap-2 font-semibold text-slate-700">
-            <Atom className="w-4 h-4 text-teal-700" />
+            <Atom className="w-4 h-4 text-teal-700 shrink-0" />
             <span>ChemLab 11 – Hệ thống Ôn luyện Lý thuyết Hóa học 11 (Sulfur &amp; Hợp chất)</span>
           </div>
           <div>
@@ -2873,43 +2905,56 @@ export default function ChemistryStudyPlatform() {
       </footer>
 
       {/* Spacer so the fixed mobile tab bar never covers page content */}
-      <div className="h-20 md:hidden" />
+      <div className="h-20 short:h-14 md:hidden" />
 
       {/* ==================== MOBILE BOTTOM TAB BAR ==================== */}
-      <nav className="md:hidden fixed bottom-0 inset-x-0 z-40 bg-white/95 backdrop-blur-md border-t border-slate-200/90 safe-bottom shadow-[0_-4px_20px_rgba(15,23,42,0.08)]">
-        <div className="grid grid-cols-4 px-2 pt-1.5 pb-1">
-          {(
-            [
-              { id: "home", label: "Trang chủ", icon: LayoutGrid, badge: 0 },
-              { id: "practice", label: "Làm bài", icon: ListChecks, badge: 0 },
-              { id: "wrong_vault", label: "Câu sai", icon: Flame, badge: stats.wrong },
-              { id: "theory", label: "Lý thuyết", icon: BookOpen, badge: 0 },
-            ] as const
-          ).map((tab) => {
+      <nav
+        aria-label="Điều hướng chính"
+        className="md:hidden fixed bottom-0 inset-x-0 z-40 bg-white/95 backdrop-blur-md border-t border-slate-200/90 safe-bottom shadow-[0_-4px_20px_rgba(15,23,42,0.08)] pl-[max(0.5rem,env(safe-area-inset-left))] pr-[max(0.5rem,env(safe-area-inset-right))]"
+      >
+        <div className="relative grid grid-cols-4 pt-1.5 pb-1 short:py-0.5">
+          {/* Sliding active indicator (4 equal columns → pure CSS transform) */}
+          <span
+            aria-hidden="true"
+            className="absolute top-0 left-0 w-1/4 flex justify-center transition-transform duration-300 ease-smooth"
+            style={{
+              transform: `translateX(${
+                NAV_TABS.findIndex((t) => t.id === activeNav) * 100
+              }%)`,
+            }}
+          >
+            <span className="h-[3px] w-9 rounded-full bg-teal-600" />
+          </span>
+          {NAV_TABS.map((tab) => {
             const Icon = tab.icon;
             const isActive = activeNav === tab.id;
+            const badge = tab.id === "wrong_vault" ? stats.wrong : 0;
             return (
               <button
                 key={tab.id}
                 type="button"
-                onClick={() => setActiveNav(tab.id)}
+                onClick={() => navigateTo(tab.id)}
                 aria-current={isActive ? "page" : undefined}
-                className={`relative flex flex-col items-center justify-center gap-0.5 py-2 min-h-[56px] rounded-xl text-[11px] font-bold transition-all active:scale-95 ${
+                className={`group relative flex flex-col short:flex-row items-center justify-center gap-0.5 short:gap-1.5 py-2 short:py-1 min-h-[56px] short:min-h-[44px] rounded-xl text-[11px] font-bold transition-[color,scale] duration-200 active:scale-90 ${
                   isActive ? "text-teal-700" : "text-slate-500"
                 }`}
               >
-                <span
-                  className={`absolute top-0 h-0.5 w-8 rounded-full ${
-                    isActive ? "bg-teal-600" : "bg-transparent"
-                  }`}
-                />
-                <Icon className="w-5 h-5" />
+                <span className="relative">
+                  <Icon
+                    className={`w-5 h-5 transition-transform duration-300 ease-spring ${
+                      isActive ? "-translate-y-0.5 scale-110" : ""
+                    }`}
+                  />
+                  {badge > 0 && (
+                    <span
+                      key={badge}
+                      className="absolute -top-1.5 -right-3 min-w-[18px] px-1 py-0.5 rounded-full bg-rose-600 text-white font-mono text-[10px] leading-none text-center animate-pop"
+                    >
+                      {badge}
+                    </span>
+                  )}
+                </span>
                 <span>{tab.label}</span>
-                {tab.badge > 0 && (
-                  <span className="absolute top-1 right-3 px-1.5 py-0.5 rounded-full bg-rose-600 text-white font-mono text-[10px] leading-none">
-                    {tab.badge}
-                  </span>
-                )}
               </button>
             );
           })}

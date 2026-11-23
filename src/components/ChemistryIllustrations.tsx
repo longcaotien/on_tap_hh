@@ -26,7 +26,7 @@ export function ChemistryIllustration({
   const [captionOpen, setCaptionOpen] = useState(false);
 
   return (
-    <div className="my-4 rounded-2xl border border-slate-200/90 bg-gradient-to-b from-white to-slate-50/90 shadow-sm overflow-hidden transition-all">
+    <div className="my-4 rounded-2xl border border-slate-200/90 bg-gradient-to-b from-white to-slate-50/90 shadow-sm overflow-hidden">
       {/* Top Lab Diagram Toolbar */}
       <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 bg-slate-100/80 border-b border-slate-200/70 text-xs text-slate-600">
         <div className="flex items-center gap-2 font-medium text-slate-700">
@@ -37,7 +37,8 @@ export function ChemistryIllustration({
           <button
             type="button"
             onClick={() => setShowLabels((v) => !v)}
-            className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${
+            aria-pressed={showLabels}
+            className={`inline-flex items-center gap-1 px-2.5 py-1 min-h-[36px] rounded-lg text-xs font-medium transition-[background-color,border-color,color,scale] duration-150 active:scale-95 ${
               showLabels
                 ? "bg-teal-600/10 text-teal-800 border border-teal-600/20"
                 : "bg-white text-slate-600 border border-slate-200 hover:bg-slate-50"
@@ -49,7 +50,8 @@ export function ChemistryIllustration({
           <button
             type="button"
             onClick={() => setZoomed((v) => !v)}
-            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 text-xs font-medium transition-colors"
+            aria-pressed={zoomed}
+            className="inline-flex items-center gap-1 px-2.5 py-1 min-h-[36px] rounded-lg bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 active:scale-95 text-xs font-medium transition-[background-color,scale] duration-150"
             title={zoomed ? "Thu nhỏ" : "Phóng to hình"}
           >
             {zoomed ? (
@@ -67,11 +69,11 @@ export function ChemistryIllustration({
 
       {/* Main SVG Canvas */}
       <div
-        className={`flex items-center justify-center p-4 sm:p-6 transition-all duration-300 ${
+        className={`flex items-center justify-center p-3 sm:p-6 transition-[min-height,background-color] duration-300 ease-smooth ${
           zoomed ? "min-h-[360px] bg-white" : "min-h-[230px]"
         }`}
       >
-        <div className={`w-full transition-all duration-300 ${zoomed ? "max-w-2xl" : "max-w-lg"}`}>
+        <div className={`w-full transition-[max-width] duration-300 ease-smooth ${zoomed ? "max-w-2xl" : "max-w-lg"}`}>
           {id === "s8_ring" && <S8RingSvg showLabels={showLabels} />}
           {id === "so2_collection" && <So2CollectionSvg showLabels={showLabels} />}
           {id === "so2_drying" && <So2DryingSvg showLabels={showLabels} />}
