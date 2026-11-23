@@ -1,7 +1,8 @@
 "use client";
 
-import React, { useState, useRef } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import { CHEMISTRY_QUESTIONS, TopicId } from "@/data/chemistryQuestions";
+import { useSlidingIndicator } from "@/components/ui";
 import {
   Atom,
   BookOpen,
@@ -38,21 +39,60 @@ export function ChemistryTheoryHub({ onStartTopicQuiz }: Props) {
 
   const touchStartRef = useRef<{ x: number; y: number } | null>(null);
   const suppressClickRef = useRef(false);
+  // Which entrance animation the flashcard plays when its content changes
+  const [cardMotion, setCardMotion] = useState<"flip" | "next" | "prev">("next");
+  const modeSwitchRef = useSlidingIndicator<HTMLDivElement>(activeTab);
 
   const handleNextCard = () => {
+    setCardMotion("next");
     setIsFlipped(false);
     setCardIndex((prev) => (prev + 1) % filteredQuestions.length);
   };
 
   const handlePrevCard = () => {
+    setCardMotion("prev");
     setIsFlipped(false);
     setCardIndex((prev) => (prev - 1 + filteredQuestions.length) % filteredQuestions.length);
   };
 
+  const handleFlipCard = () => {
+    setCardMotion("flip");
+    setIsFlipped((v) => !v);
+  };
+
+  // Desktop shortcuts on the flashcard tab: ← → change card, Space/Enter flips
+  const keyHandlersRef = useRef({ next: handleNextCard, prev: handlePrevCard, flip: handleFlipCard });
+  useEffect(() => {
+    keyHandlersRef.current = { next: handleNextCard, prev: handlePrevCard, flip: handleFlipCard };
+  });
+  useEffect(() => {
+    if (activeTab !== "flashcards") return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      const target = e.target as HTMLElement | null;
+      if (target && target.closest("button, a, input, textarea, select, [role='button']")) {
+        // Let focused controls handle their own keys (Enter/Space activate them)
+        if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+      }
+      if (e.key === "ArrowRight") {
+        e.preventDefault();
+        keyHandlersRef.current.next();
+      } else if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        keyHandlersRef.current.prev();
+      } else if (e.key === " " || e.key === "Enter") {
+        e.preventDefault();
+        keyHandlersRef.current.flip();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [activeTab]);
+
   return (
-    <div className="space-y-8">
+    <div className="space-y-6 sm:space-y-8">
       {/* Mode Switcher Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white rounded-2xl p-5 border border-slate-200/90 shadow-sm">
+      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 bg-white rounded-2xl p-4 sm:p-5 border border-slate-200/90 shadow-sm">
         <div>
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-teal-50 text-teal-800 text-xs font-semibold mb-2 border border-teal-200">
             <BookOpen className="w-3.5 h-3.5" />
@@ -66,38 +106,52 @@ export function ChemistryTheoryHub({ onStartTopicQuiz }: Props) {
           </p>
         </div>
 
-        <div className="inline-flex rounded-xl bg-slate-100 p-1 border border-slate-200 self-start">
+        <div
+          ref={modeSwitchRef}
+          className="relative flex sm:inline-flex w-full sm:w-auto rounded-xl bg-slate-100 p-1 border border-slate-200 sm:self-start"
+        >
+          <span
+            data-indicator
+            aria-hidden="true"
+            className="tab-indicator rounded-lg bg-white shadow-sm"
+          />
           <button
             type="button"
+            data-active={activeTab === "cheat_sheet"}
+            aria-pressed={activeTab === "cheat_sheet"}
             onClick={() => setActiveTab("cheat_sheet")}
-            className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all ${
+            className={`relative z-10 flex-1 sm:flex-none inline-flex items-center justify-center gap-2 px-3 sm:px-4 py-2 min-h-[44px] rounded-lg text-xs sm:text-sm font-semibold whitespace-nowrap transition-[color,scale] duration-200 active:scale-95 ${
               activeTab === "cheat_sheet"
-                ? "bg-white text-teal-800 shadow-sm"
+                ? "text-teal-800"
                 : "text-slate-600 hover:text-slate-900"
             }`}
           >
-            <FlaskConical className="w-4 h-4" />
-            Sơ đồ &amp; Bảng tổng hợp
+            <FlaskConical className="w-4 h-4 shrink-0" />
+            <span className="sm:hidden">Bảng tổng hợp</span>
+            <span className="hidden sm:inline">Sơ đồ &amp; Bảng tổng hợp</span>
           </button>
           <button
             type="button"
+            data-active={activeTab === "flashcards"}
+            aria-pressed={activeTab === "flashcards"}
             onClick={() => setActiveTab("flashcards")}
-            className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all ${
+            className={`relative z-10 flex-1 sm:flex-none inline-flex items-center justify-center gap-2 px-3 sm:px-4 py-2 min-h-[44px] rounded-lg text-xs sm:text-sm font-semibold whitespace-nowrap transition-[color,scale] duration-200 active:scale-95 ${
               activeTab === "flashcards"
-                ? "bg-white text-teal-800 shadow-sm"
+                ? "text-teal-800"
                 : "text-slate-600 hover:text-slate-900"
             }`}
           >
-            <Layers className="w-4 h-4" />
-            Thẻ ghi nhớ Flashcard (47 thẻ)
+            <Layers className="w-4 h-4 shrink-0" />
+            <span className="sm:hidden">Flashcard (47)</span>
+            <span className="hidden sm:inline">Thẻ ghi nhớ Flashcard (47 thẻ)</span>
           </button>
         </div>
       </div>
 
       {activeTab === "cheat_sheet" ? (
-        <div className="space-y-6">
+        <div className="space-y-6 stagger">
           {/* Oxidation States Scale Banner */}
-          <div className="bg-gradient-to-r from-slate-900 via-slate-800 to-teal-950 text-white rounded-2xl p-6 shadow-md">
+          <div className="bg-gradient-to-r from-slate-900 via-slate-800 to-teal-950 text-white rounded-2xl p-4 sm:p-6 shadow-md">
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6">
               <div>
                 <span className="text-xs font-mono uppercase tracking-wider text-amber-300 font-semibold">
@@ -113,7 +167,7 @@ export function ChemistryTheoryHub({ onStartTopicQuiz }: Props) {
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-              <div className="rounded-xl bg-white/10 backdrop-blur-sm border border-white/15 p-4">
+              <div className="rounded-xl bg-white/10 border border-white/15 p-4">
                 <div className="flex items-center justify-between">
                   <span className="text-2xl font-mono font-bold text-rose-300">S⁻²</span>
                   <span className="px-2.5 py-0.5 rounded-full text-xs bg-rose-500/20 text-rose-200 border border-rose-400/30">
@@ -126,7 +180,7 @@ export function ChemistryTheoryHub({ onStartTopicQuiz }: Props) {
                 </p>
               </div>
 
-              <div className="rounded-xl bg-amber-400/15 backdrop-blur-sm border border-amber-300/30 p-4">
+              <div className="rounded-xl bg-amber-400/15 border border-amber-300/30 p-4">
                 <div className="flex items-center justify-between">
                   <span className="text-2xl font-mono font-bold text-amber-300">S⁰</span>
                   <span className="px-2.5 py-0.5 rounded-full text-xs bg-amber-400/20 text-amber-200 border border-amber-300/30">
@@ -139,7 +193,7 @@ export function ChemistryTheoryHub({ onStartTopicQuiz }: Props) {
                 </p>
               </div>
 
-              <div className="rounded-xl bg-sky-400/15 backdrop-blur-sm border border-sky-300/30 p-4">
+              <div className="rounded-xl bg-sky-400/15 border border-sky-300/30 p-4">
                 <div className="flex items-center justify-between">
                   <span className="text-2xl font-mono font-bold text-sky-300">S⁺⁴</span>
                   <span className="px-2.5 py-0.5 rounded-full text-xs bg-sky-400/20 text-sky-200 border border-sky-300/30">
@@ -152,7 +206,7 @@ export function ChemistryTheoryHub({ onStartTopicQuiz }: Props) {
                 </p>
               </div>
 
-              <div className="rounded-xl bg-teal-400/15 backdrop-blur-sm border border-teal-300/30 p-4">
+              <div className="rounded-xl bg-teal-400/15 border border-teal-300/30 p-4">
                 <div className="flex items-center justify-between">
                   <span className="text-2xl font-mono font-bold text-teal-300">S⁺⁶</span>
                   <span className="px-2.5 py-0.5 rounded-full text-xs bg-teal-400/20 text-teal-200 border border-teal-300/30">
@@ -170,7 +224,7 @@ export function ChemistryTheoryHub({ onStartTopicQuiz }: Props) {
           {/* 3-Column Core Knowledge Cards */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
             {/* Card 1: Khoáng vật & Công thức dễ nhầm */}
-            <div className="bg-white rounded-2xl border border-slate-200/90 p-5 shadow-sm flex flex-col justify-between">
+            <div className="bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-sm hover:shadow-md hover:-translate-y-0.5 transition-[box-shadow,translate] duration-300 ease-smooth flex flex-col justify-between">
               <div>
                 <div className="flex items-center gap-2.5 mb-4">
                   <div className="w-10 h-10 rounded-xl bg-amber-100 text-amber-700 flex items-center justify-center">
@@ -225,14 +279,14 @@ export function ChemistryTheoryHub({ onStartTopicQuiz }: Props) {
               <button
                 type="button"
                 onClick={() => onStartTopicQuiz("sulfur")}
-                className="mt-4 w-full py-2.5 rounded-xl bg-amber-50 hover:bg-amber-100 text-amber-900 font-semibold text-xs border border-amber-200 transition-colors"
+                className="mt-4 w-full py-2.5 px-3 min-h-[44px] rounded-xl bg-amber-50 hover:bg-amber-100 active:scale-[0.98] text-amber-900 font-semibold text-xs border border-amber-200 transition-[background-color,scale] duration-150"
               >
                 Luyện ngay Chuyên đề Sulfur (12 câu) →
               </button>
             </div>
 
             {/* Card 2: Khí SO2 & Môi trường */}
-            <div className="bg-white rounded-2xl border border-slate-200/90 p-5 shadow-sm flex flex-col justify-between">
+            <div className="bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-sm hover:shadow-md hover:-translate-y-0.5 transition-[box-shadow,translate] duration-300 ease-smooth flex flex-col justify-between">
               <div>
                 <div className="flex items-center gap-2.5 mb-4">
                   <div className="w-10 h-10 rounded-xl bg-sky-100 text-sky-700 flex items-center justify-center">
@@ -281,14 +335,14 @@ export function ChemistryTheoryHub({ onStartTopicQuiz }: Props) {
               <button
                 type="button"
                 onClick={() => onStartTopicQuiz("so2")}
-                className="mt-4 w-full py-2.5 rounded-xl bg-sky-50 hover:bg-sky-100 text-sky-900 font-semibold text-xs border border-sky-200 transition-colors"
+                className="mt-4 w-full py-2.5 px-3 min-h-[44px] rounded-xl bg-sky-50 hover:bg-sky-100 active:scale-[0.98] text-sky-900 font-semibold text-xs border border-sky-200 transition-[background-color,scale] duration-150"
               >
                 Luyện ngay Chuyên đề Sulfur dioxide (12 câu) →
               </button>
             </div>
 
             {/* Card 3: An toàn H2SO4 & Phương pháp tiếp xúc */}
-            <div className="bg-white rounded-2xl border border-slate-200/90 p-5 shadow-sm flex flex-col justify-between">
+            <div className="bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-sm hover:shadow-md hover:-translate-y-0.5 transition-[box-shadow,translate] duration-300 ease-smooth flex flex-col justify-between">
               <div>
                 <div className="flex items-center gap-2.5 mb-4">
                   <div className="w-10 h-10 rounded-xl bg-teal-100 text-teal-700 flex items-center justify-center">
@@ -337,7 +391,7 @@ export function ChemistryTheoryHub({ onStartTopicQuiz }: Props) {
               <button
                 type="button"
                 onClick={() => onStartTopicQuiz("h2so4")}
-                className="mt-4 w-full py-2.5 rounded-xl bg-teal-50 hover:bg-teal-100 text-teal-900 font-semibold text-xs border border-teal-200 transition-colors"
+                className="mt-4 w-full py-2.5 px-3 min-h-[44px] rounded-xl bg-teal-50 hover:bg-teal-100 active:scale-[0.98] text-teal-900 font-semibold text-xs border border-teal-200 transition-[background-color,scale] duration-150"
               >
                 Luyện ngay Chuyên đề H₂SO₄ &amp; Sulfate (16 câu) →
               </button>
@@ -347,7 +401,7 @@ export function ChemistryTheoryHub({ onStartTopicQuiz }: Props) {
       ) : (
         /* ==================== FLASHCARD MODE ==================== */
         <div
-          className="max-w-3xl mx-auto space-y-6"
+          className="max-w-3xl mx-auto space-y-4 sm:space-y-6 animate-rise"
           style={{ touchAction: "pan-y" }}
           onTouchStart={(e) => {
             const target = e.target as HTMLElement;
@@ -373,8 +427,8 @@ export function ChemistryTheoryHub({ onStartTopicQuiz }: Props) {
           }}
         >
           {/* Topic Filter Pills */}
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
+            <div className="flex gap-2 overflow-x-auto no-scrollbar -mx-3 px-3 sm:mx-0 sm:px-0 sm:flex-wrap sm:overflow-visible max-w-[calc(100%+1.5rem)] sm:max-w-none">
               {[
                 { id: "all", label: "Tất cả (47 thẻ)" },
                 { id: "sulfur", label: "Sulfur (12)" },
@@ -385,12 +439,14 @@ export function ChemistryTheoryHub({ onStartTopicQuiz }: Props) {
                 <button
                   key={tab.id}
                   type="button"
+                  aria-pressed={topicFilter === tab.id}
                   onClick={() => {
+                    setCardMotion("next");
                     setTopicFilter(tab.id as TopicId | "all");
                     setCardIndex(0);
                     setIsFlipped(false);
                   }}
-                  className={`px-3.5 py-1.5 rounded-full text-xs font-semibold transition-all ${
+                  className={`shrink-0 px-3.5 py-1.5 min-h-[40px] rounded-full text-xs font-semibold whitespace-nowrap transition-[background-color,color,scale] duration-150 active:scale-95 ${
                     topicFilter === tab.id
                       ? "bg-teal-700 text-white shadow-sm"
                       : "bg-white text-slate-600 border border-slate-200 hover:bg-slate-50"
@@ -406,18 +462,37 @@ export function ChemistryTheoryHub({ onStartTopicQuiz }: Props) {
             </span>
           </div>
 
-          {/* Interactive 3D-feel Flashcard */}
+          {/* Interactive Flashcard: flips in 3D when turned, slides when changing card */}
           <div
+            key={`${currentQ.id}-${isFlipped ? "back" : "front"}`}
+            role="button"
+            tabIndex={0}
+            aria-label={isFlipped ? "Thẻ đang hiện đáp án — nhấn để lật lại" : "Thẻ đang hiện đề bài — nhấn để lật xem đáp án"}
             onClick={() => {
               if (suppressClickRef.current) {
                 suppressClickRef.current = false;
                 return;
               }
-              setIsFlipped((v) => !v);
+              handleFlipCard();
             }}
-            className="cursor-pointer select-none rounded-3xl border-2 border-slate-200 bg-white p-6 sm:p-10 shadow-md hover:shadow-lg transition-all min-h-[320px] flex flex-col justify-between relative overflow-hidden"
+            onKeyDown={(e) => {
+              if (e.target !== e.currentTarget) return;
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                handleFlipCard();
+              }
+            }}
+            className={`cursor-pointer select-none rounded-3xl border-2 bg-white p-5 sm:p-10 shadow-md hover:shadow-lg transition-shadow duration-300 min-h-[320px] flex flex-col justify-between relative overflow-hidden ${
+              isFlipped ? "border-emerald-300" : "border-slate-200"
+            } ${
+              cardMotion === "flip"
+                ? "animate-flip-in"
+                : cardMotion === "prev"
+                ? "animate-slide-prev"
+                : "animate-slide-next"
+            }`}
           >
-            <div className="flex items-center justify-between border-b border-slate-100 pb-4">
+            <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 border-b border-slate-100 pb-4">
               <div className="flex items-center gap-2">
                 <span className="px-3 py-1 rounded-lg bg-teal-700 text-white font-mono text-xs font-bold">
                   {currentQ.code}
@@ -459,7 +534,7 @@ export function ChemistryTheoryHub({ onStartTopicQuiz }: Props) {
                 )}
               </div>
             ) : (
-              <div className="my-6 space-y-4 animate-fadeIn">
+              <div className="my-6 space-y-4">
                 <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200 text-xs font-bold">
                   <Sparkles className="w-3.5 h-3.5" />
                   ĐÁP ÁN CHUẨN &amp; GIẢI THÍCH CHI TIẾT
@@ -504,7 +579,7 @@ export function ChemistryTheoryHub({ onStartTopicQuiz }: Props) {
               </div>
             )}
 
-            <div className="flex items-center justify-between pt-4 border-t border-slate-100 text-xs text-slate-500">
+            <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 pt-4 border-t border-slate-100 text-xs text-slate-500">
               <span className="font-mono font-semibold text-teal-800 bg-teal-50 px-2.5 py-1 rounded-md border border-teal-200">
                 Từ khóa: {currentQ.keyFormula}
               </span>
@@ -517,28 +592,33 @@ export function ChemistryTheoryHub({ onStartTopicQuiz }: Props) {
             <button
               type="button"
               onClick={handlePrevCard}
-              className="inline-flex items-center gap-1.5 px-3 sm:px-5 py-2.5 min-h-[48px] rounded-xl bg-white border border-slate-200 text-slate-700 font-semibold text-xs sm:text-sm hover:bg-slate-50 active:scale-95 transition-all shadow-sm"
+              aria-label="Thẻ trước"
+              className="inline-flex items-center gap-1.5 px-3 sm:px-5 py-2.5 min-h-[48px] rounded-xl bg-white border border-slate-200 text-slate-700 font-semibold text-xs sm:text-sm hover:bg-slate-50 active:scale-95 transition-[background-color,scale] duration-150 shadow-sm"
             >
               <ChevronLeft className="w-4 h-4" />
               <span className="hidden min-[420px]:inline">Câu trước</span>
             </button>
             <button
               type="button"
-              onClick={() => setIsFlipped((v) => !v)}
-              className="inline-flex items-center justify-center gap-2 flex-1 sm:flex-none px-4 sm:px-6 py-2.5 min-h-[48px] rounded-xl bg-teal-700 text-white font-semibold text-xs sm:text-sm hover:bg-teal-800 active:scale-95 transition-all shadow-sm"
+              onClick={handleFlipCard}
+              className="group inline-flex items-center justify-center gap-2 flex-1 sm:flex-none px-4 sm:px-6 py-2.5 min-h-[48px] rounded-xl bg-teal-700 text-white font-semibold text-xs sm:text-sm hover:bg-teal-800 active:scale-95 transition-[background-color,scale] duration-150 shadow-sm"
             >
-              <RotateCcw className="w-4 h-4" />
+              <RotateCcw className="w-4 h-4 transition-transform duration-500 group-hover:-rotate-180" />
               {isFlipped ? "Xem đề bài" : "Lật xem đáp án"}
             </button>
             <button
               type="button"
               onClick={handleNextCard}
-              className="inline-flex items-center gap-1.5 px-3 sm:px-5 py-2.5 min-h-[48px] rounded-xl bg-white border border-slate-200 text-slate-700 font-semibold text-xs sm:text-sm hover:bg-slate-50 active:scale-95 transition-all shadow-sm"
+              aria-label="Thẻ tiếp theo"
+              className="inline-flex items-center gap-1.5 px-3 sm:px-5 py-2.5 min-h-[48px] rounded-xl bg-white border border-slate-200 text-slate-700 font-semibold text-xs sm:text-sm hover:bg-slate-50 active:scale-95 transition-[background-color,scale] duration-150 shadow-sm"
             >
               <span className="hidden min-[420px]:inline">Câu tiếp theo</span>
               <ChevronRight className="w-4 h-4" />
             </button>
           </div>
+          <p className="hidden md:block text-center text-[11px] text-slate-400">
+            Mẹo: phím ← → để đổi thẻ, phím Space để lật thẻ • Trên điện thoại, vuốt sang trái/phải để đổi thẻ
+          </p>
         </div>
       )}
     </div>
